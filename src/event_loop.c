@@ -13,6 +13,8 @@ volatile bool __pending_gesture;
 volatile uint64_t __last_gesture_time;
 volatile uint64_t __last_cmd_tab_time;
 
+#define EDGE_RESIZE_THRESHOLD 12.0f
+
 void update_window_notifications(void)
 {
     int window_count = 0;
@@ -1208,6 +1210,16 @@ static EVENT_HANDLER(MOUSE_DOWN)
         g_mouse_state.current_action = g_mouse_state.action1;
     } else if (button == kCGMouseButtonRight && g_mouse_state.modifier == mod) {
         g_mouse_state.current_action = g_mouse_state.action2;
+    }
+
+    if (g_mouse_state.current_action == MOUSE_MODE_NONE && button == kCGMouseButtonLeft && mod == 0) {
+        CGRect f = g_mouse_state.window_frame;
+        if (point.x <= f.origin.x + EDGE_RESIZE_THRESHOLD ||
+            point.x >= f.origin.x + f.size.width - EDGE_RESIZE_THRESHOLD ||
+            point.y <= f.origin.y + EDGE_RESIZE_THRESHOLD ||
+            point.y >= f.origin.y + f.size.height - EDGE_RESIZE_THRESHOLD) {
+            g_mouse_state.current_action = MOUSE_MODE_RESIZE;
+        }
     }
 
     if (g_mouse_state.current_action == MOUSE_MODE_RESIZE) {
