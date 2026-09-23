@@ -55,10 +55,10 @@ if [ ! -w "$MAN_DIR" ]; then
     exit 1
 fi
 
-AUTHOR="asmvik"
+AUTHOR="Christian-SC26"
 NAME="yabai"
-VERSION="7.1.25"
-EXPECTED_HASH="76f383841570bfe1e3fd24cedd9b1a4b804b43b0f39c86a951c97d187fc6b1b4"
+VERSION="7.1.27"
+EXPECTED_HASH="cfc32e5fb0f698c42786aeeeaba2a5e961ede0df2517018b45cbd7c26fecd051"
 TMP_DIR="./${AUTHOR}-${NAME}-v${VERSION}-installer"
 
 mkdir $TMP_DIR
@@ -88,7 +88,7 @@ if [ "$FILE_HASH" = "$EXPECTED_HASH" ]; then
     echo "Sudoers file configuration row:"
     echo "  $(whoami) ALL=(root) NOPASSWD: sha256:$(shasum -a 256 ${BIN_DIR}/yabai | cut -d " " -f 1) ${BIN_DIR}/yabai --load-sa"
     echo ""
-    echo "README: https://github.com/asmvik/yabai/wiki/Installing-yabai-(latest-release)#configure-scripting-addition"
+    echo "README: https://github.com/Christian-SC26/yabai/wiki/Installing-yabai-(latest-release)#configure-scripting-addition"
 else
     echo "Hash does not match the expected value.. abort."
     echo "Expected hash: $EXPECTED_HASH"

@@ -142,6 +142,14 @@ void window_manager_apply_rule_effects_to_window(struct space_manager *sm, struc
         window_clear_rule_flag(window, WINDOW_RULE_MFF_VALUE);
     }
 
+    if (effects->ffm == RULE_PROP_ON) {
+        window_set_rule_flag(window, WINDOW_RULE_FFM);
+        window_set_rule_flag(window, WINDOW_RULE_FFM_VALUE);
+    } else if (effects->ffm == RULE_PROP_OFF) {
+        window_set_rule_flag(window, WINDOW_RULE_FFM);
+        window_clear_rule_flag(window, WINDOW_RULE_FFM_VALUE);
+    }
+
     if (rule_effects_check_flag(effects, RULE_LAYER)) {
         window_manager_set_window_layer(window, effects->layer);
     }
@@ -1742,6 +1750,10 @@ bool window_manager_add_existing_application_windows(struct space_manager *sm, s
 
     if (window_list_ref) CFRelease(window_list_ref);
 
+    if (workspace_is_macos_sequoia() || (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
+        update_window_notifications();
+    }
+
     return result;
 }
 
@@ -2265,7 +2277,8 @@ void window_manager_wait_for_native_fullscreen_transition(struct window *window)
         workspace_is_macos_sonoma() ||
         workspace_is_macos_sequoia() ||
         (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
-        while (!space_is_user(space_manager_active_space())) {
+int timeout = 30;
+        while (!space_is_user(space_manager_active_space()) && --timeout > 0) {
 
             //
             // NOTE(asmvik): Window has exited native-fullscreen mode.
@@ -2338,7 +2351,7 @@ void window_manager_toggle_window_zoom_parent(struct window_manager *wm, struct 
     if (node->zoom == node->parent) {
         node->zoom = NULL;
         if (space_is_visible(view->sid)) {
-            window_node_flush(node);
+            window_node_flush(node->parent);
         } else {
             view_set_flag(view, VIEW_IS_DIRTY);
         }
@@ -2367,7 +2380,7 @@ void window_manager_toggle_window_zoom_fullscreen(struct window_manager *wm, str
     if (node->zoom == view->root) {
         node->zoom = NULL;
         if (space_is_visible(view->sid)) {
-            window_node_flush(node);
+            window_node_flush(view->root);
         } else {
             view_set_flag(view, VIEW_IS_DIRTY);
         }
@@ -2394,7 +2407,7 @@ void window_manager_toggle_window_windowed_fullscreen(struct window *window)
     } else {
         window_set_flag(window, WINDOW_WINDOWED);
         window->windowed_frame = window->frame;
-        CGRect bounds = display_bounds_constrained(did, true);
+        CGRect bounds = display_bounds_constrained(did, false);
         window_manager_animate_window((struct window_capture) { .window = window, .x = bounds.origin.x, .y = bounds.origin.y, .w = bounds.size.width, .h = bounds.size.height });
     }
 }
@@ -2483,6 +2496,12 @@ mode_2:;
 mode_3:;
         space_manager_move_window_to_space(sid, window);
         scripting_addition_order_window(window->id, 1, 0);
+
+        int attempts = 0;
+        while (window_space(window->id) != sid && attempts++ < 10) {
+            usleep(15000);
+        }
+
         window_manager_focus_window_with_raise(&window->application->psn, window->id, window->ref);
     }
 
@@ -2572,6 +2591,12 @@ static void window_manager_validate_windows_on_space(struct window_manager *wm, 
             window_manager_purify_window(wm, window);
 
             view_set_flag(view, VIEW_IS_DIRTY);
+
+            if (!window_space(window->id)) {
+                if (__sync_bool_compare_and_swap(&window->id_ptr, &window->id, NULL)) {
+                    event_loop_post(&g_event_loop, WINDOW_DESTROYED, window, 0);
+                }
+            }
         }
     }
 }
@@ -2580,7 +2605,21 @@ static void window_manager_check_for_windows_on_space(struct window_manager *wm,
 {
     for (int i = 0; i < window_count; ++i) {
         struct window *window = window_manager_find_window(wm, window_list[i]);
-        if (!window || !window_manager_should_manage_window(window)) continue;
+        if (!window) continue;
+
+        if (space_is_user(view->sid)) {
+            if (window_check_flag(window, WINDOW_FULLSCREEN) && !window_is_fullscreen(window)) {
+                window_clear_flag(window, WINDOW_FULLSCREEN);
+            }
+            if (!window_can_move(window) && window_ax_can_move(window)) {
+                window_set_flag(window, WINDOW_MOVABLE);
+            }
+            if (!window_can_resize(window) && window_ax_can_resize(window)) {
+                window_set_flag(window, WINDOW_RESIZABLE);
+            }
+        }
+
+        if (!window_manager_should_manage_window(window)) continue;
 
         struct view *existing_view = window_manager_find_managed_window(wm, window);
         if (existing_view && existing_view->layout != VIEW_FLOAT && existing_view != view) {

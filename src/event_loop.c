@@ -13,24 +13,31 @@ volatile bool __pending_gesture;
 volatile uint64_t __last_gesture_time;
 volatile uint64_t __last_cmd_tab_time;
 
-static void update_window_notifications(void)
+void update_window_notifications(void)
 {
     int window_count = 0;
-    uint32_t window_list[1024] = {0};
+    int capacity = g_window_manager.window.count + 64;
+    uint32_t *window_list = malloc(sizeof(uint32_t) * capacity);
+    if (!window_list) return;
 
     if (workspace_is_macos_sequoia() || (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
         // NOTE(asmvik): Subscribe to all windows because of window_destroyed (and ordered) notifications
         table_for (struct window *window, g_window_manager.window, {
-            window_list[window_count++] = window->id;
+            if (window_count < capacity) {
+                window_list[window_count++] = window->id;
+            }
         })
     } else {
         // NOTE(asmvik): Subscribe to windows that have a feedback_border because of window_ordered notifications
         table_for (struct window_node *node, g_window_manager.insert_feedback, {
-            window_list[window_count++] = node->window_order[0];
+            if (window_count < capacity) {
+                window_list[window_count++] = node->window_order[0];
+            }
         })
     }
 
     SLSRequestNotificationsForWindows(g_connection, window_list, window_count);
+    free(window_list);
 }
 
 static void window_did_receive_focus(struct window_manager *wm, struct mouse_state *ms, struct window *window)
@@ -357,19 +364,34 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
     }
 
     if (g_space_manager.skip_window_focus_animation) {
-        uint64_t psn_sid = process_manager_active_space_for_psn(application->connection);
-
-        uint64_t last_cmd_tab_time = __atomic_load_n(&__last_cmd_tab_time, __ATOMIC_RELAXED);
-        float dt = ((float) read_os_timer() - last_cmd_tab_time) * (1000.0f / (float)read_os_freq());
-        if (dt > 1500.0f) {
-            CFTypeRef dummy = NULL;
-            AXUIElementCopyAttributeValue(application->ref, CFSTR("__fence"), &dummy);
+        uint32_t focused_wid = application_focused_window(application);
+        bool focused_on_visible_space = false;
+        if (focused_wid) {
+            if (window_is_sticky(focused_wid)) {
+                focused_on_visible_space = true;
+            } else {
+                uint64_t focused_sid = window_space(focused_wid);
+                if (focused_sid && space_is_visible(focused_sid)) {
+                    focused_on_visible_space = true;
+                }
+            }
         }
 
-        if (__atomic_load_n(&__pending_window_focus, __ATOMIC_RELAXED) == false) {
-            if (psn_sid && !space_is_visible(psn_sid)) {
-                SLSSpaceSetFrontPSN(g_connection, psn_sid, process->psn);
-                space_manager_focus_space_using_gesture(space_display_id(psn_sid), psn_sid);
+        if (!focused_on_visible_space) {
+            uint64_t psn_sid = process_manager_active_space_for_psn(application->connection);
+
+            uint64_t last_cmd_tab_time = __atomic_load_n(&__last_cmd_tab_time, __ATOMIC_RELAXED);
+            float dt = ((float) read_os_timer() - last_cmd_tab_time) * (1000.0f / (float)read_os_freq());
+            if (dt > 1500.0f) {
+                CFTypeRef dummy = NULL;
+                AXUIElementCopyAttributeValue(application->ref, CFSTR("__fence"), &dummy);
+            }
+
+            if (__atomic_load_n(&__pending_window_focus, __ATOMIC_RELAXED) == false) {
+                if (psn_sid && !space_is_visible(psn_sid)) {
+                    SLSSpaceSetFrontPSN(g_connection, psn_sid, process->psn);
+                    space_manager_focus_space_using_gesture(space_display_id(psn_sid), psn_sid);
+                }
             }
         }
     }
@@ -403,6 +425,7 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
         g_window_manager.focused_window_id = 0;
         g_window_manager.focused_window_psn = application->psn;
         g_mouse_state.ffm_window_id = 0;
+        window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, g_space_manager.current_space_id);
         return;
     }
 
@@ -420,6 +443,7 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
     window_did_receive_focus(&g_window_manager, &g_mouse_state, window);
     event_signal_push(SIGNAL_WINDOW_FOCUSED, window);
     __atomic_store_n(&__pending_window_focus, false, __ATOMIC_RELEASE);
+    window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, g_space_manager.current_space_id);
 }
 #pragma clang diagnostic pop
 
@@ -661,15 +685,19 @@ static EVENT_HANDLER(WINDOW_FOCUSED)
     debug("%s: %s %d\n", __FUNCTION__, window->application->name, window->id);
 
     if (g_space_manager.skip_window_focus_animation) {
-        uint64_t sid = window_space(window->id);
-        if (sid && !space_is_visible(sid)) {
-            SLSSpaceSetFrontPSN(g_connection, sid, window->application->psn);
-            space_manager_focus_space_using_gesture(space_display_id(sid), sid);
+        bool is_sticky = window_check_flag(window, WINDOW_STICKY) || window_is_sticky(window->id);
+        if (!is_sticky) {
+            uint64_t sid = window_space(window->id);
+            if (sid && !space_is_visible(sid)) {
+                SLSSpaceSetFrontPSN(g_connection, sid, window->application->psn);
+                space_manager_focus_space_using_gesture(space_display_id(sid), sid);
+            }
         }
     }
 
     window_did_receive_focus(&g_window_manager, &g_mouse_state, window);
     event_signal_push(SIGNAL_WINDOW_FOCUSED, window);
+    window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, g_space_manager.current_space_id);
 }
 
 static EVENT_HANDLER(WINDOW_MOVED)
@@ -739,7 +767,10 @@ static EVENT_HANDLER(WINDOW_RESIZED)
     }
 
     CGRect new_frame = window_ax_frame(window);
-    if (CGRectEqualToRect(new_frame, window->frame)) {
+    bool was_fullscreen = window_check_flag(window, WINDOW_FULLSCREEN);
+    bool is_fullscreen = window_is_fullscreen(window);
+
+    if (was_fullscreen == is_fullscreen && CGRectEqualToRect(new_frame, window->frame)) {
         debug("%s:DEBOUNCED %s %d\n", __FUNCTION__, window->application->name, window->id);
         return;
     }
@@ -747,16 +778,13 @@ static EVENT_HANDLER(WINDOW_RESIZED)
     debug("%s: %s %d\n", __FUNCTION__, window->application->name, window->id);
     event_signal_push(SIGNAL_WINDOW_RESIZED, window);
 
-    bool was_fullscreen = window_check_flag(window, WINDOW_FULLSCREEN);
-
-    bool is_fullscreen = window_is_fullscreen(window);
     if (is_fullscreen) {
         window_set_flag(window, WINDOW_FULLSCREEN);
     } else {
         window_clear_flag(window, WINDOW_FULLSCREEN);
     }
 
-    if (was_fullscreen != is_fullscreen) {
+    if (!was_fullscreen && is_fullscreen) {
         if (window_ax_can_move(window)) {
             window_set_flag(window, WINDOW_MOVABLE);
         } else {
@@ -774,12 +802,9 @@ static EVENT_HANDLER(WINDOW_RESIZED)
 
         if (window->subrole) CFRelease(window->subrole);
         window->subrole = window_ax_subrole(window);
-    }
 
-    bool windowed_fullscreen = CGRectEqualToRect(window->windowed_frame, window->frame);
-    window->frame = new_frame;
+        window->frame = new_frame;
 
-    if (!was_fullscreen && is_fullscreen) {
         struct view *view = window_manager_find_managed_window(&g_window_manager, window);
         if (view) {
             space_manager_untile_window(view, window);
@@ -789,11 +814,57 @@ static EVENT_HANDLER(WINDOW_RESIZED)
     } else if (was_fullscreen && !is_fullscreen) {
         window_manager_wait_for_native_fullscreen_transition(window);
 
-        if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window)) {
-            struct view *view = space_manager_tile_window_on_space(&g_space_manager, window, window_space(window->id));
-            window_manager_add_managed_window(&g_window_manager, window, view);
+        int attempts = 0;
+        while (!window_ax_can_move(window) && attempts++ < 15) {
+            usleep(20000);
+        }
+
+        if (window_ax_can_move(window)) {
+            window_set_flag(window, WINDOW_MOVABLE);
+        } else {
+            window_clear_flag(window, WINDOW_MOVABLE);
+        }
+
+        if (window_ax_can_resize(window)) {
+            window_set_flag(window, WINDOW_RESIZABLE);
+        } else {
+            window_clear_flag(window, WINDOW_RESIZABLE);
+        }
+
+        if (window->role) CFRelease(window->role);
+        window->role = window_ax_role(window);
+
+        if (window->subrole) CFRelease(window->subrole);
+        window->subrole = window_ax_subrole(window);
+
+        window->frame = window_ax_frame(window);
+
+        uint64_t sid = window_space(window->id);
+        if (!sid || !space_is_user(sid)) {
+            sid = space_manager_active_space();
+        }
+
+        if (window_manager_should_manage_window(window)) {
+            struct view *view = window_manager_find_managed_window(&g_window_manager, window);
+            if (!view) {
+                view = space_manager_tile_window_on_space(&g_space_manager, window, sid);
+                window_manager_add_managed_window(&g_window_manager, window, view);
+            }
+
+            if (view && view->layout != VIEW_FLOAT) {
+                view_update(view);
+                if (space_is_visible(view->sid)) {
+                    window_node_flush(view->root);
+                    view_clear_flag(view, VIEW_IS_DIRTY);
+                } else {
+                    view_set_flag(view, VIEW_IS_DIRTY);
+                }
+            }
         }
     } else if (!was_fullscreen == !is_fullscreen) {
+        bool windowed_fullscreen = CGRectEqualToRect(window->windowed_frame, window->frame);
+        window->frame = new_frame;
+
         if (g_mouse_state.current_action == MOUSE_MODE_MOVE && g_mouse_state.window == window) {
             g_mouse_state.window_frame.size = g_mouse_state.window->frame.size;
         }
@@ -1140,6 +1211,7 @@ static EVENT_HANDLER(MOUSE_DOWN)
     }
 
     if (g_mouse_state.current_action == MOUSE_MODE_RESIZE) {
+        g_mouse_state.live_resized = false;
         CGPoint frame_mid = { CGRectGetMidX(g_mouse_state.window_frame), CGRectGetMidY(g_mouse_state.window_frame) };
         if (point.x < frame_mid.x) g_mouse_state.direction |= HANDLE_LEFT;
         if (point.y < frame_mid.y) g_mouse_state.direction |= HANDLE_TOP;
@@ -1221,12 +1293,15 @@ static EVENT_HANDLER(MOUSE_UP)
             mouse_drop_no_target(&g_space_manager, &g_window_manager, src_view, dst_view, g_mouse_state.window, a_node);
         }
     } else if (info.changed_position || info.changed_size) {
-        mouse_drop_try_adjust_bsp_grid(&g_window_manager, src_view, g_mouse_state.window, &info);
+        if (!g_mouse_state.live_resized) {
+            mouse_drop_try_adjust_bsp_grid(&g_window_manager, src_view, g_mouse_state.window, &info);
+        }
     }
 
 err:
     g_mouse_state.window = NULL;
 res:
+    g_mouse_state.live_resized = false;
     g_mouse_state.current_action = MOUSE_MODE_NONE;
 out:
     CFRelease(context);
@@ -1264,12 +1339,35 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
     } else if (g_mouse_state.current_action == MOUSE_MODE_RESIZE) {
         uint64_t event_time = read_os_timer();
         float dt = ((float) event_time - g_mouse_state.last_moved_time) * (1000.0f / (float)read_os_freq());
-        if (dt < 67.67f) goto out;
+        if (dt < 16.0f) goto out;
 
         int dx = point.x - g_mouse_state.down_location.x;
         int dy = point.y - g_mouse_state.down_location.y;
+        if (abs(dx) < 2 && abs(dy) < 2) goto out;
 
-        window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, g_mouse_state.direction, dx, dy, false);
+        struct view *view = window_manager_find_managed_window(&g_window_manager, g_mouse_state.window);
+        if (view && view->layout == VIEW_BSP) {
+            uint8_t direction = 0;
+            if (dx != 0) {
+                if (g_mouse_state.direction & HANDLE_LEFT)  direction |= HANDLE_LEFT;
+                if (g_mouse_state.direction & HANDLE_RIGHT) direction |= HANDLE_RIGHT;
+            }
+            if (dy != 0) {
+                if (g_mouse_state.direction & HANDLE_TOP)    direction |= HANDLE_TOP;
+                if (g_mouse_state.direction & HANDLE_BOTTOM) direction |= HANDLE_BOTTOM;
+            }
+
+            if (direction != 0) {
+                enum window_op_error err = window_manager_resize_window_relative(&g_window_manager, g_mouse_state.window, direction, dx, dy, false);
+                if (err == WINDOW_OP_ERROR_SUCCESS) {
+                    g_mouse_state.live_resized = true;
+                } else {
+                    window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, g_mouse_state.direction, dx, dy, false);
+                }
+            }
+        } else {
+            window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, g_mouse_state.direction, dx, dy, false);
+        }
 
         g_mouse_state.last_moved_time = event_time;
         g_mouse_state.down_location = point;
@@ -1354,11 +1452,16 @@ static EVENT_HANDLER(MOUSE_MOVED)
     if (dt < 1250.0f) goto out;
 
     CGPoint point = CGEventGetLocation(context);
+
+    struct window *focused_window = window_manager_find_window(&g_window_manager, g_window_manager.focused_window_id);
+    if (focused_window && window_check_rule_flag(focused_window, WINDOW_RULE_FFM) && !window_check_rule_flag(focused_window, WINDOW_RULE_FFM_VALUE)) goto out;
+
     struct window *window = window_manager_find_window_at_point(&g_window_manager, point);
 
     if (window) {
         if (window->id == g_window_manager.focused_window_id) goto out;
         if (!window_manager_is_window_eligible(window))       goto out;
+        if (window_check_rule_flag(window, WINDOW_RULE_FFM) && !window_check_rule_flag(window, WINDOW_RULE_FFM_VALUE)) goto out;
 
         if (g_window_manager.ffm_mode == FFM_AUTOFOCUS) {
 

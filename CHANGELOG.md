@@ -5,7 +5,29 @@ All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [7.1.27] - 2026-09-22
 ### Changed
+- Full support for macOS 27 beta 2 (macOS 27.2, build 26B5091g) Dock.app opcode offsets, pattern signatures, and updated `Dock.Spaces` selectors (`currentSpaceForDisplay:`)
+- Fix Dock crash (SIGABRT unrecognized selector) when switching spaces on macOS 27 beta 2
+- Add resilient fallback for display space lookup via `_displayUUID` and `currentSpace`
+
+### Added
+- Save and restore multi-space workspace sessions via `yabai -m space --save-session [<name|path>]`, `--load-session [<name|path>]`, and `--dump-session`, as well as individual space layout templates via `--save-layout`, `--load-layout`, and `--dump-layout` [#902](https://github.com/asmvik/yabai/issues/902)
+- Smooth live 60 FPS mouse resizing with real-time BSP grid border dragging across sibling nodes [#2712](https://github.com/asmvik/yabai/issues/2712) [#2714](https://github.com/asmvik/yabai/issues/2714)
+- Rule option `ffm=off` / `focus_follows_mouse=off` to exclude specific applications or windows from focus-follows-mouse [#2750](https://github.com/asmvik/yabai/issues/2750)
+- Full support for macOS 27 Golden Gate space switching and scripting addition injection into Dock.app [#2846](https://github.com/asmvik/yabai/issues/2846) [#2844](https://github.com/asmvik/yabai/issues/2844) [#2841](https://github.com/asmvik/yabai/issues/2841) [#2840](https://github.com/asmvik/yabai/issues/2840) [#2837](https://github.com/asmvik/yabai/issues/2837) [#2824](https://github.com/asmvik/yabai/issues/2824)
+- Automatic detection and cleanup of legacy `com.koekeishiya.yabai` launchd service on service install/start/restart/stop [#2808](https://github.com/asmvik/yabai/issues/2808)
+
+### Changed
+- Prevent space jump gestures when focusing sticky / Picture-in-Picture windows with `skip_window_focus_animation` enabled [#2825](https://github.com/asmvik/yabai/issues/2825)
+- Fix frame recalculation and animation when dragging the only window on a space into another space with `mouse_drop_action warp` [#2817](https://github.com/asmvik/yabai/issues/2817)
+- Run the mouse event tap on its own thread with a dedicated CFRunLoop so clicks are no longer held or dropped while the main thread is blocked in an Accessibility request [#2829](https://github.com/asmvik/yabai/issues/2829)
+- Prevent launchd restart loop when another yabai instance is already running by detecting lock owner PID via `fcntl(F_GETLK)` and exiting cleanly with code 0 [#2808](https://github.com/asmvik/yabai/issues/2808)
+- Flush root view and validate space on window close to eliminate empty BSP gaps and clean up zombie windows [#2828](https://github.com/asmvik/yabai/issues/2828)
+- Fix windowed-fullscreen mode to respect `external_bar` top and bottom padding [#2776](https://github.com/asmvik/yabai/issues/2776)
+- Fix scratchpad `--toggle` jumping back to previous space by waiting for asynchronous space assignment before focusing with raise [#2807](https://github.com/asmvik/yabai/issues/2807)
+- Fix BSP retiling and geometry recalculation when exiting fullscreen or zoom-fullscreen [#2758](https://github.com/asmvik/yabai/issues/2758) [#2576](https://github.com/asmvik/yabai/issues/2576) [#2653](https://github.com/asmvik/yabai/issues/2653) [#2716](https://github.com/asmvik/yabai/issues/2716)
 - Fixed scripting-addition *add_space* pattern for macOS 26.6 Apple Silicon arm64 [#2799](https://github.com/asmvik/yabai/issues/2799)
 - Fixed minor memory leak on space destruction, and added a few missing null checks to SkyLight API calls [#2791](https://github.com/asmvik/yabai/issues/2791)
 
@@ -811,109 +833,110 @@ The *window_destroyed* signal is now triggered for windows that are implicitly d
 ### Added
 - First official release
 
-[Unreleased]: https://github.com/asmvik/yabai/compare/v7.1.25...HEAD
-[7.1.25]: https://github.com/asmvik/yabai/compare/v7.1.24...v7.1.25
-[7.1.24]: https://github.com/asmvik/yabai/compare/v7.1.23...v7.1.24
-[7.1.23]: https://github.com/asmvik/yabai/compare/v7.1.22...v7.1.23
-[7.1.22]: https://github.com/asmvik/yabai/compare/v7.1.21...v7.1.22
-[7.1.21]: https://github.com/asmvik/yabai/compare/v7.1.20...v7.1.21
-[7.1.20]: https://github.com/asmvik/yabai/compare/v7.1.19...v7.1.20
-[7.1.19]: https://github.com/asmvik/yabai/compare/v7.1.18...v7.1.19
-[7.1.18]: https://github.com/asmvik/yabai/compare/v7.1.17...v7.1.18
-[7.1.17]: https://github.com/asmvik/yabai/compare/v7.1.16...v7.1.17
-[7.1.16]: https://github.com/asmvik/yabai/compare/v7.1.15...v7.1.16
-[7.1.15]: https://github.com/asmvik/yabai/compare/v7.1.14...v7.1.15
-[7.1.14]: https://github.com/asmvik/yabai/compare/v7.1.13...v7.1.14
-[7.1.13]: https://github.com/asmvik/yabai/compare/v7.1.12...v7.1.13
-[7.1.12]: https://github.com/asmvik/yabai/compare/v7.1.11...v7.1.12
-[7.1.11]: https://github.com/asmvik/yabai/compare/v7.1.10...v7.1.11
-[7.1.10]: https://github.com/asmvik/yabai/compare/v7.1.9...v7.1.10
-[7.1.9]: https://github.com/asmvik/yabai/compare/v7.1.8...v7.1.9
-[7.1.8]: https://github.com/asmvik/yabai/compare/v7.1.7...v7.1.8
-[7.1.7]: https://github.com/asmvik/yabai/compare/v7.1.6...v7.1.7
-[7.1.6]: https://github.com/asmvik/yabai/compare/v7.1.5...v7.1.6
-[7.1.5]: https://github.com/asmvik/yabai/compare/v7.1.4...v7.1.5
-[7.1.4]: https://github.com/asmvik/yabai/compare/v7.1.3...v7.1.4
-[7.1.3]: https://github.com/asmvik/yabai/compare/v7.1.2...v7.1.3
-[7.1.2]: https://github.com/asmvik/yabai/compare/v7.1.1...v7.1.2
-[7.1.1]: https://github.com/asmvik/yabai/compare/v7.1.0...v7.1.1
-[7.1.0]: https://github.com/asmvik/yabai/compare/v7.0.4...v7.1.0
-[7.0.4]: https://github.com/asmvik/yabai/compare/v7.0.3...v7.0.4
-[7.0.3]: https://github.com/asmvik/yabai/compare/v7.0.2...v7.0.3
-[7.0.2]: https://github.com/asmvik/yabai/compare/v7.0.1...v7.0.2
-[7.0.1]: https://github.com/asmvik/yabai/compare/v7.0.0...v7.0.1
-[7.0.0]: https://github.com/asmvik/yabai/compare/v6.0.15...v7.0.0
-[6.0.15]: https://github.com/asmvik/yabai/compare/v6.0.14...v6.0.15
-[6.0.14]: https://github.com/asmvik/yabai/compare/v6.0.13...v6.0.14
-[6.0.13]: https://github.com/asmvik/yabai/compare/v6.0.12...v6.0.13
-[6.0.12]: https://github.com/asmvik/yabai/compare/v6.0.11...v6.0.12
-[6.0.11]: https://github.com/asmvik/yabai/compare/v6.0.10...v6.0.11
-[6.0.10]: https://github.com/asmvik/yabai/compare/v6.0.9...v6.0.10
-[6.0.9]: https://github.com/asmvik/yabai/compare/v6.0.8...v6.0.9
-[6.0.8]: https://github.com/asmvik/yabai/compare/v6.0.7...v6.0.8
-[6.0.7]: https://github.com/asmvik/yabai/compare/v6.0.6...v6.0.7
-[6.0.6]: https://github.com/asmvik/yabai/compare/v6.0.5...v6.0.6
-[6.0.5]: https://github.com/asmvik/yabai/compare/v6.0.4...v6.0.5
-[6.0.4]: https://github.com/asmvik/yabai/compare/v6.0.3...v6.0.4
-[6.0.3]: https://github.com/asmvik/yabai/compare/v6.0.2...v6.0.3
-[6.0.2]: https://github.com/asmvik/yabai/compare/v6.0.1...v6.0.2
-[6.0.1]: https://github.com/asmvik/yabai/compare/v6.0.0...v6.0.1
-[6.0.0]: https://github.com/asmvik/yabai/compare/v5.0.9...v6.0.0
-[5.0.9]: https://github.com/asmvik/yabai/compare/v5.0.8...v5.0.9
-[5.0.8]: https://github.com/asmvik/yabai/compare/v5.0.7...v5.0.8
-[5.0.7]: https://github.com/asmvik/yabai/compare/v5.0.6...v5.0.7
-[5.0.6]: https://github.com/asmvik/yabai/compare/v5.0.5...v5.0.6
-[5.0.5]: https://github.com/asmvik/yabai/compare/v5.0.4...v5.0.5
-[5.0.4]: https://github.com/asmvik/yabai/compare/v5.0.3...v5.0.4
-[5.0.3]: https://github.com/asmvik/yabai/compare/v5.0.2...v5.0.3
-[5.0.2]: https://github.com/asmvik/yabai/compare/v5.0.1...v5.0.2
-[5.0.1]: https://github.com/asmvik/yabai/compare/v5.0.0...v5.0.1
-[5.0.0]: https://github.com/asmvik/yabai/compare/v4.0.4...v5.0.0
-[4.0.4]: https://github.com/asmvik/yabai/compare/v4.0.3...v4.0.4
-[4.0.3]: https://github.com/asmvik/yabai/compare/v4.0.2...v4.0.3
-[4.0.2]: https://github.com/asmvik/yabai/compare/v4.0.1...v4.0.2
-[4.0.1]: https://github.com/asmvik/yabai/compare/v4.0.0...v4.0.1
-[4.0.0]: https://github.com/asmvik/yabai/compare/v3.3.10...v4.0.0
-[3.3.10]: https://github.com/asmvik/yabai/compare/v3.3.9...v3.3.10
-[3.3.9]: https://github.com/asmvik/yabai/compare/v3.3.8...v3.3.9
-[3.3.8]: https://github.com/asmvik/yabai/compare/v3.3.7...v3.3.8
-[3.3.7]: https://github.com/asmvik/yabai/compare/v3.3.6...v3.3.7
-[3.3.6]: https://github.com/asmvik/yabai/compare/v3.3.5...v3.3.6
-[3.3.5]: https://github.com/asmvik/yabai/compare/v3.3.4...v3.3.5
-[3.3.4]: https://github.com/asmvik/yabai/compare/v3.3.3...v3.3.4
-[3.3.3]: https://github.com/asmvik/yabai/compare/v3.3.2...v3.3.3
-[3.3.2]: https://github.com/asmvik/yabai/compare/v3.3.1...v3.3.2
-[3.3.1]: https://github.com/asmvik/yabai/compare/v3.3.0...v3.3.1
-[3.3.0]: https://github.com/asmvik/yabai/compare/v3.2.1...v3.3.0
-[3.2.1]: https://github.com/asmvik/yabai/compare/v3.2.0...v3.2.1
-[3.2.0]: https://github.com/asmvik/yabai/compare/v3.1.2...v3.2.0
-[3.1.2]: https://github.com/asmvik/yabai/compare/v3.1.1...v3.1.2
-[3.1.1]: https://github.com/asmvik/yabai/compare/v3.1.0...v3.1.1
-[3.1.0]: https://github.com/asmvik/yabai/compare/v3.0.2...v3.1.0
-[3.0.2]: https://github.com/asmvik/yabai/compare/v3.0.1...v3.0.2
-[3.0.1]: https://github.com/asmvik/yabai/compare/v3.0.0...v3.0.1
-[3.0.0]: https://github.com/asmvik/yabai/compare/v2.4.3...v3.0.0
-[2.4.3]: https://github.com/asmvik/yabai/compare/v2.4.2...v2.4.3
-[2.4.2]: https://github.com/asmvik/yabai/compare/v2.4.1...v2.4.2
-[2.4.1]: https://github.com/asmvik/yabai/compare/v2.4.0...v2.4.1
-[2.4.0]: https://github.com/asmvik/yabai/compare/v2.3.0...v2.4.0
-[2.3.0]: https://github.com/asmvik/yabai/compare/v2.2.3...v2.3.0
-[2.2.3]: https://github.com/asmvik/yabai/compare/v2.2.2...v2.2.3
-[2.2.2]: https://github.com/asmvik/yabai/compare/v2.2.1...v2.2.2
-[2.2.1]: https://github.com/asmvik/yabai/compare/v2.2.0...v2.2.1
-[2.2.0]: https://github.com/asmvik/yabai/compare/v2.1.3...v2.2.0
-[2.1.3]: https://github.com/asmvik/yabai/compare/v2.1.2...v2.1.3
-[2.1.2]: https://github.com/asmvik/yabai/compare/v2.1.1...v2.1.2
-[2.1.1]: https://github.com/asmvik/yabai/compare/v2.1.0...v2.1.1
-[2.1.0]: https://github.com/asmvik/yabai/compare/v2.0.1...v2.1.0
-[2.0.1]: https://github.com/asmvik/yabai/compare/v2.0.0...v2.0.1
-[2.0.0]: https://github.com/asmvik/yabai/compare/v1.1.2...v2.0.0
-[1.1.2]: https://github.com/asmvik/yabai/compare/v1.1.1...v1.1.2
-[1.1.1]: https://github.com/asmvik/yabai/compare/v1.1.0...v1.1.1
-[1.1.0]: https://github.com/asmvik/yabai/compare/v1.0.6...v1.1.0
-[1.0.6]: https://github.com/asmvik/yabai/compare/v1.0.5...v1.0.6
-[1.0.5]: https://github.com/asmvik/yabai/compare/v1.0.4...v1.0.5
-[1.0.4]: https://github.com/asmvik/yabai/compare/v1.0.3...v1.0.4
-[1.0.3]: https://github.com/asmvik/yabai/compare/v1.0.2...v1.0.3
-[1.0.2]: https://github.com/asmvik/yabai/compare/v1.0.1...v1.0.2
-[1.0.1]: https://github.com/asmvik/yabai/releases/tag/v1.0.1
+[Unreleased]: https://github.com/Christian-SC26/yabai/compare/v7.1.26...HEAD
+[7.1.26]: https://github.com/Christian-SC26/yabai/compare/v7.1.25...v7.1.26
+[7.1.25]: https://github.com/Christian-SC26/yabai/compare/v7.1.24...v7.1.25
+[7.1.24]: https://github.com/Christian-SC26/yabai/compare/v7.1.23...v7.1.24
+[7.1.23]: https://github.com/Christian-SC26/yabai/compare/v7.1.22...v7.1.23
+[7.1.22]: https://github.com/Christian-SC26/yabai/compare/v7.1.21...v7.1.22
+[7.1.21]: https://github.com/Christian-SC26/yabai/compare/v7.1.20...v7.1.21
+[7.1.20]: https://github.com/Christian-SC26/yabai/compare/v7.1.19...v7.1.20
+[7.1.19]: https://github.com/Christian-SC26/yabai/compare/v7.1.18...v7.1.19
+[7.1.18]: https://github.com/Christian-SC26/yabai/compare/v7.1.17...v7.1.18
+[7.1.17]: https://github.com/Christian-SC26/yabai/compare/v7.1.16...v7.1.17
+[7.1.16]: https://github.com/Christian-SC26/yabai/compare/v7.1.15...v7.1.16
+[7.1.15]: https://github.com/Christian-SC26/yabai/compare/v7.1.14...v7.1.15
+[7.1.14]: https://github.com/Christian-SC26/yabai/compare/v7.1.13...v7.1.14
+[7.1.13]: https://github.com/Christian-SC26/yabai/compare/v7.1.12...v7.1.13
+[7.1.12]: https://github.com/Christian-SC26/yabai/compare/v7.1.11...v7.1.12
+[7.1.11]: https://github.com/Christian-SC26/yabai/compare/v7.1.10...v7.1.11
+[7.1.10]: https://github.com/Christian-SC26/yabai/compare/v7.1.9...v7.1.10
+[7.1.9]: https://github.com/Christian-SC26/yabai/compare/v7.1.8...v7.1.9
+[7.1.8]: https://github.com/Christian-SC26/yabai/compare/v7.1.7...v7.1.8
+[7.1.7]: https://github.com/Christian-SC26/yabai/compare/v7.1.6...v7.1.7
+[7.1.6]: https://github.com/Christian-SC26/yabai/compare/v7.1.5...v7.1.6
+[7.1.5]: https://github.com/Christian-SC26/yabai/compare/v7.1.4...v7.1.5
+[7.1.4]: https://github.com/Christian-SC26/yabai/compare/v7.1.3...v7.1.4
+[7.1.3]: https://github.com/Christian-SC26/yabai/compare/v7.1.2...v7.1.3
+[7.1.2]: https://github.com/Christian-SC26/yabai/compare/v7.1.1...v7.1.2
+[7.1.1]: https://github.com/Christian-SC26/yabai/compare/v7.1.0...v7.1.1
+[7.1.0]: https://github.com/Christian-SC26/yabai/compare/v7.0.4...v7.1.0
+[7.0.4]: https://github.com/Christian-SC26/yabai/compare/v7.0.3...v7.0.4
+[7.0.3]: https://github.com/Christian-SC26/yabai/compare/v7.0.2...v7.0.3
+[7.0.2]: https://github.com/Christian-SC26/yabai/compare/v7.0.1...v7.0.2
+[7.0.1]: https://github.com/Christian-SC26/yabai/compare/v7.0.0...v7.0.1
+[7.0.0]: https://github.com/Christian-SC26/yabai/compare/v6.0.15...v7.0.0
+[6.0.15]: https://github.com/Christian-SC26/yabai/compare/v6.0.14...v6.0.15
+[6.0.14]: https://github.com/Christian-SC26/yabai/compare/v6.0.13...v6.0.14
+[6.0.13]: https://github.com/Christian-SC26/yabai/compare/v6.0.12...v6.0.13
+[6.0.12]: https://github.com/Christian-SC26/yabai/compare/v6.0.11...v6.0.12
+[6.0.11]: https://github.com/Christian-SC26/yabai/compare/v6.0.10...v6.0.11
+[6.0.10]: https://github.com/Christian-SC26/yabai/compare/v6.0.9...v6.0.10
+[6.0.9]: https://github.com/Christian-SC26/yabai/compare/v6.0.8...v6.0.9
+[6.0.8]: https://github.com/Christian-SC26/yabai/compare/v6.0.7...v6.0.8
+[6.0.7]: https://github.com/Christian-SC26/yabai/compare/v6.0.6...v6.0.7
+[6.0.6]: https://github.com/Christian-SC26/yabai/compare/v6.0.5...v6.0.6
+[6.0.5]: https://github.com/Christian-SC26/yabai/compare/v6.0.4...v6.0.5
+[6.0.4]: https://github.com/Christian-SC26/yabai/compare/v6.0.3...v6.0.4
+[6.0.3]: https://github.com/Christian-SC26/yabai/compare/v6.0.2...v6.0.3
+[6.0.2]: https://github.com/Christian-SC26/yabai/compare/v6.0.1...v6.0.2
+[6.0.1]: https://github.com/Christian-SC26/yabai/compare/v6.0.0...v6.0.1
+[6.0.0]: https://github.com/Christian-SC26/yabai/compare/v5.0.9...v6.0.0
+[5.0.9]: https://github.com/Christian-SC26/yabai/compare/v5.0.8...v5.0.9
+[5.0.8]: https://github.com/Christian-SC26/yabai/compare/v5.0.7...v5.0.8
+[5.0.7]: https://github.com/Christian-SC26/yabai/compare/v5.0.6...v5.0.7
+[5.0.6]: https://github.com/Christian-SC26/yabai/compare/v5.0.5...v5.0.6
+[5.0.5]: https://github.com/Christian-SC26/yabai/compare/v5.0.4...v5.0.5
+[5.0.4]: https://github.com/Christian-SC26/yabai/compare/v5.0.3...v5.0.4
+[5.0.3]: https://github.com/Christian-SC26/yabai/compare/v5.0.2...v5.0.3
+[5.0.2]: https://github.com/Christian-SC26/yabai/compare/v5.0.1...v5.0.2
+[5.0.1]: https://github.com/Christian-SC26/yabai/compare/v5.0.0...v5.0.1
+[5.0.0]: https://github.com/Christian-SC26/yabai/compare/v4.0.4...v5.0.0
+[4.0.4]: https://github.com/Christian-SC26/yabai/compare/v4.0.3...v4.0.4
+[4.0.3]: https://github.com/Christian-SC26/yabai/compare/v4.0.2...v4.0.3
+[4.0.2]: https://github.com/Christian-SC26/yabai/compare/v4.0.1...v4.0.2
+[4.0.1]: https://github.com/Christian-SC26/yabai/compare/v4.0.0...v4.0.1
+[4.0.0]: https://github.com/Christian-SC26/yabai/compare/v3.3.10...v4.0.0
+[3.3.10]: https://github.com/Christian-SC26/yabai/compare/v3.3.9...v3.3.10
+[3.3.9]: https://github.com/Christian-SC26/yabai/compare/v3.3.8...v3.3.9
+[3.3.8]: https://github.com/Christian-SC26/yabai/compare/v3.3.7...v3.3.8
+[3.3.7]: https://github.com/Christian-SC26/yabai/compare/v3.3.6...v3.3.7
+[3.3.6]: https://github.com/Christian-SC26/yabai/compare/v3.3.5...v3.3.6
+[3.3.5]: https://github.com/Christian-SC26/yabai/compare/v3.3.4...v3.3.5
+[3.3.4]: https://github.com/Christian-SC26/yabai/compare/v3.3.3...v3.3.4
+[3.3.3]: https://github.com/Christian-SC26/yabai/compare/v3.3.2...v3.3.3
+[3.3.2]: https://github.com/Christian-SC26/yabai/compare/v3.3.1...v3.3.2
+[3.3.1]: https://github.com/Christian-SC26/yabai/compare/v3.3.0...v3.3.1
+[3.3.0]: https://github.com/Christian-SC26/yabai/compare/v3.2.1...v3.3.0
+[3.2.1]: https://github.com/Christian-SC26/yabai/compare/v3.2.0...v3.2.1
+[3.2.0]: https://github.com/Christian-SC26/yabai/compare/v3.1.2...v3.2.0
+[3.1.2]: https://github.com/Christian-SC26/yabai/compare/v3.1.1...v3.1.2
+[3.1.1]: https://github.com/Christian-SC26/yabai/compare/v3.1.0...v3.1.1
+[3.1.0]: https://github.com/Christian-SC26/yabai/compare/v3.0.2...v3.1.0
+[3.0.2]: https://github.com/Christian-SC26/yabai/compare/v3.0.1...v3.0.2
+[3.0.1]: https://github.com/Christian-SC26/yabai/compare/v3.0.0...v3.0.1
+[3.0.0]: https://github.com/Christian-SC26/yabai/compare/v2.4.3...v3.0.0
+[2.4.3]: https://github.com/Christian-SC26/yabai/compare/v2.4.2...v2.4.3
+[2.4.2]: https://github.com/Christian-SC26/yabai/compare/v2.4.1...v2.4.2
+[2.4.1]: https://github.com/Christian-SC26/yabai/compare/v2.4.0...v2.4.1
+[2.4.0]: https://github.com/Christian-SC26/yabai/compare/v2.3.0...v2.4.0
+[2.3.0]: https://github.com/Christian-SC26/yabai/compare/v2.2.3...v2.3.0
+[2.2.3]: https://github.com/Christian-SC26/yabai/compare/v2.2.2...v2.2.3
+[2.2.2]: https://github.com/Christian-SC26/yabai/compare/v2.2.1...v2.2.2
+[2.2.1]: https://github.com/Christian-SC26/yabai/compare/v2.2.0...v2.2.1
+[2.2.0]: https://github.com/Christian-SC26/yabai/compare/v2.1.3...v2.2.0
+[2.1.3]: https://github.com/Christian-SC26/yabai/compare/v2.1.2...v2.1.3
+[2.1.2]: https://github.com/Christian-SC26/yabai/compare/v2.1.1...v2.1.2
+[2.1.1]: https://github.com/Christian-SC26/yabai/compare/v2.1.0...v2.1.1
+[2.1.0]: https://github.com/Christian-SC26/yabai/compare/v2.0.1...v2.1.0
+[2.0.1]: https://github.com/Christian-SC26/yabai/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/Christian-SC26/yabai/compare/v1.1.2...v2.0.0
+[1.1.2]: https://github.com/Christian-SC26/yabai/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/Christian-SC26/yabai/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/Christian-SC26/yabai/compare/v1.0.6...v1.1.0
+[1.0.6]: https://github.com/Christian-SC26/yabai/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/Christian-SC26/yabai/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/Christian-SC26/yabai/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/Christian-SC26/yabai/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/Christian-SC26/yabai/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/Christian-SC26/yabai/releases/tag/v1.0.1

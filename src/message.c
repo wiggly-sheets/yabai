@@ -110,8 +110,14 @@ extern bool g_verbose;
 #define COMMAND_SPACE_PADDING  "--padding"
 #define COMMAND_SPACE_GAP      "--gap"
 #define COMMAND_SPACE_TOGGLE   "--toggle"
-#define COMMAND_SPACE_LAYOUT   "--layout"
-#define COMMAND_SPACE_LABEL    "--label"
+#define COMMAND_SPACE_LAYOUT       "--layout"
+#define COMMAND_SPACE_LABEL        "--label"
+#define COMMAND_SPACE_SAVE_LAYOUT   "--save-layout"
+#define COMMAND_SPACE_LOAD_LAYOUT   "--load-layout"
+#define COMMAND_SPACE_DUMP_LAYOUT   "--dump-layout"
+#define COMMAND_SPACE_SAVE_SESSION  "--save-session"
+#define COMMAND_SPACE_LOAD_SESSION  "--load-session"
+#define COMMAND_SPACE_DUMP_SESSION  "--dump-session"
 
 #define ARGUMENT_SPACE_ROTATE_90    "90"
 #define ARGUMENT_SPACE_ROTATE_180   "180"
@@ -206,6 +212,7 @@ extern bool g_verbose;
 #define ARGUMENT_RULE_KEY_MANAGE     "manage"
 #define ARGUMENT_RULE_KEY_STICKY     "sticky"
 #define ARGUMENT_RULE_KEY_MFF        "mouse_follows_focus"
+#define ARGUMENT_RULE_KEY_FFM        "focus_follows_mouse"
 #define ARGUMENT_RULE_KEY_SUB_LAYER  "sub-layer"
 #define ARGUMENT_RULE_KEY_FULLSCR    "native-fullscreen"
 #define ARGUMENT_RULE_KEY_GRID       "grid"
@@ -2038,6 +2045,71 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
                     }
                 }
             }
+        } else if (token_equals(command, COMMAND_SPACE_SAVE_SESSION) || token_equals(command, "--save-all")) {
+            struct token value = get_token(&message);
+            char path[MAXLEN] = {0};
+            char err[512] = {0};
+            char *name_or_path = token_is_valid(value) ? value.text : NULL;
+            if (!layout_store_save_session(name_or_path, path, sizeof(path), err, sizeof(err))) {
+                daemon_fail(rsp, "yabai: %s\n", err);
+            }
+        } else if (token_equals(command, COMMAND_SPACE_LOAD_SESSION) || token_equals(command, "--load-all") || token_equals(command, "--restore-session") || token_equals(command, "--restore-all")) {
+            struct token value = get_token(&message);
+            char path[MAXLEN] = {0};
+            char err[512] = {0};
+            char *name_or_path = token_is_valid(value) ? value.text : NULL;
+            if (!layout_store_restore_session(name_or_path, path, sizeof(path), err, sizeof(err))) {
+                daemon_fail(rsp, "yabai: %s\n", err);
+            }
+        } else if (token_equals(command, COMMAND_SPACE_DUMP_SESSION) || token_equals(command, "--dump-all")) {
+            char err[512] = {0};
+            if (!layout_store_dump_session(rsp, err, sizeof(err))) {
+                daemon_fail(rsp, "yabai: %s\n", err);
+            }
+        } else if (token_equals(command, COMMAND_SPACE_SAVE_LAYOUT) || token_equals(command, "--save")) {
+            struct token value = get_token(&message);
+            char path[MAXLEN] = {0};
+            char err[512] = {0};
+            if (token_is_valid(value) && token_equals(value, "all")) {
+                struct token name_tok = get_token(&message);
+                char *name = token_is_valid(name_tok) ? name_tok.text : NULL;
+                if (!layout_store_save_session(name, path, sizeof(path), err, sizeof(err))) {
+                    daemon_fail(rsp, "yabai: %s\n", err);
+                }
+            } else {
+                char *name_or_path = token_is_valid(value) ? value.text : NULL;
+                if (!layout_store_save(acting_sid, name_or_path, path, sizeof(path), err, sizeof(err))) {
+                    daemon_fail(rsp, "yabai: %s\n", err);
+                }
+            }
+        } else if (token_equals(command, COMMAND_SPACE_LOAD_LAYOUT) || token_equals(command, "--load") || token_equals(command, "--restore-layout") || token_equals(command, "--restore")) {
+            struct token value = get_token(&message);
+            char path[MAXLEN] = {0};
+            char err[512] = {0};
+            if (token_is_valid(value) && token_equals(value, "all")) {
+                struct token name_tok = get_token(&message);
+                char *name = token_is_valid(name_tok) ? name_tok.text : NULL;
+                if (!layout_store_restore_session(name, path, sizeof(path), err, sizeof(err))) {
+                    daemon_fail(rsp, "yabai: %s\n", err);
+                }
+            } else {
+                char *name_or_path = token_is_valid(value) ? value.text : NULL;
+                if (!layout_store_restore(acting_sid, name_or_path, path, sizeof(path), err, sizeof(err))) {
+                    daemon_fail(rsp, "yabai: %s\n", err);
+                }
+            }
+        } else if (token_equals(command, COMMAND_SPACE_DUMP_LAYOUT) || token_equals(command, "--dump")) {
+            struct token value = get_token(&message);
+            char err[512] = {0};
+            if (token_is_valid(value) && token_equals(value, "all")) {
+                if (!layout_store_dump_session(rsp, err, sizeof(err))) {
+                    daemon_fail(rsp, "yabai: %s\n", err);
+                }
+            } else {
+                if (!layout_store_dump(acting_sid, rsp, err, sizeof(err))) {
+                    daemon_fail(rsp, "yabai: %s\n", err);
+                }
+            }
         } else {
             daemon_fail(rsp, "unknown command '%.*s' for domain '%.*s'\n", command.length, command.text, domain.length, domain.text);
         }
@@ -2743,13 +2815,24 @@ static bool parse_rule(FILE *rsp, char **message, struct rule *rule, struct toke
                 daemon_fail(rsp, "invalid value '%s' for key '%s'\n", value, key);
                 did_parse = false;
             }
-        } else if (string_equals(key, ARGUMENT_RULE_KEY_MFF)) {
+        } else if (string_equals(key, ARGUMENT_RULE_KEY_MFF) || string_equals(key, "mff")) {
             if (exclusion) unsupported_exclusion = key;
 
             if (string_equals(value, ARGUMENT_COMMON_VAL_ON)) {
                 rule->effects.mff = RULE_PROP_ON;
             } else if (string_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
                 rule->effects.mff = RULE_PROP_OFF;
+            } else {
+                daemon_fail(rsp, "invalid value '%s' for key '%s'\n", value, key);
+                did_parse = false;
+            }
+        } else if (string_equals(key, ARGUMENT_RULE_KEY_FFM) || string_equals(key, "ffm")) {
+            if (exclusion) unsupported_exclusion = key;
+
+            if (string_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                rule->effects.ffm = RULE_PROP_ON;
+            } else if (string_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                rule->effects.ffm = RULE_PROP_OFF;
             } else {
                 daemon_fail(rsp, "invalid value '%s' for key '%s'\n", value, key);
                 did_parse = false;

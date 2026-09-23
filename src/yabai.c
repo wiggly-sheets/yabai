@@ -22,7 +22,7 @@
 
 #define MAJOR  7
 #define MINOR  1
-#define PATCH 25
+#define PATCH 27
 
 struct signal *g_signal_event[SIGNAL_TYPE_COUNT];
 struct process_manager g_process_manager;
@@ -174,7 +174,17 @@ static inline bool configure_settings_and_acquire_lock(void)
         .l_whence = SEEK_SET
     };
 
-    return fcntl(handle, F_SETLK, &lockfd) != -1;
+    if (fcntl(handle, F_SETLK, &lockfd) == -1) {
+        lockfd.l_type = F_WRLCK;
+        if (fcntl(handle, F_GETLK, &lockfd) != -1 && lockfd.l_pid > 0) {
+            warn("yabai: another instance of yabai is already running (PID %d)! abort..\n", lockfd.l_pid);
+        } else {
+            warn("yabai: could not acquire lock-file! abort..\n");
+        }
+        return false;
+    }
+
+    return true;
 }
 #pragma clang diagnostic pop
 
@@ -197,7 +207,7 @@ static void parse_arguments(int argc, char **argv)
                         "    --version, -v          Print version to stdout and exit.\n"
                         "    --help, -h             Print options to stdout and exit.\n"
                         "Type `man yabai` for more information, or visit: "
-                        "https://github.com/asmvik/yabai/blob/v%d.%d.%d/doc/yabai.asciidoc\n", MAJOR, MINOR, PATCH);
+                        "https://github.com/Christian-SC26/yabai/blob/v%d.%d.%d/doc/yabai.asciidoc\n", MAJOR, MINOR, PATCH);
         exit(EXIT_SUCCESS);
     }
 
@@ -285,7 +295,7 @@ int main(int argc, char **argv)
     }
 
     if (!configure_settings_and_acquire_lock()) {
-        error("yabai: could not acquire lock-file! abort..\n");
+        exit(0);
     }
 
     if (!event_loop_begin(&g_event_loop)) {
