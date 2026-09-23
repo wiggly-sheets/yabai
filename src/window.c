@@ -856,10 +856,16 @@ err:
     return result;
 }
 
-bool window_shadow(uint32_t wid)
+ bool window_shadow(uint32_t wid)
 {
-    uint64_t tags = window_tags(wid);
-    return !(tags & 0x8);
+    CFTypeRef value = NULL;
+    if (SLSCopyWindowProperty(g_connection, wid, CFSTR("com.apple.WindowShadowDensity"), &value) == kCGErrorSuccess && value) {
+        float density = 0.0f;
+        CFNumberGetValue((CFNumberRef)value, kCFNumberFloatType, &density);
+        CFRelease(value);
+        return density > 0.0f;
+    }
+    return true;
 }
 
 float window_opacity(uint32_t wid)

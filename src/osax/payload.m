@@ -48,8 +48,10 @@ extern CGError SLSSetWindowAlpha(int cid, uint32_t wid, float alpha);
 extern OSStatus SLSMoveWindowWithGroup(int cid, uint32_t wid, CGPoint *point);
 extern CGError SLSReassociateWindowsSpacesByGeometry(int cid, CFArrayRef window_list);
 extern CGError SLSGetWindowOwner(int cid, uint32_t wid, int *window_cid);
-extern CGError SLSSetWindowTags(int cid, uint32_t wid, uint64_t *tags, size_t tag_size);
+ extern CGError SLSSetWindowTags(int cid, uint32_t wid, uint64_t *tags, size_t tag_size);
 extern CGError SLSClearWindowTags(int cid, uint32_t wid, uint64_t *tags, size_t tag_size);
+extern CGError SLSWindowSetShadowProperties(uint32_t wid, CFDictionaryRef options);
+extern CGError SLSCopyWindowProperty(int cid, uint32_t wid, CFStringRef property, CFTypeRef *value);
 extern CGError SLSGetWindowBounds(int cid, uint32_t wid, CGRect *frame);
 extern CGError SLSGetWindowTransform(int cid, uint32_t wid, CGAffineTransform *t);
 extern CGError SLSSetWindowTransform(int cid, uint32_t wid, CGAffineTransform t);
@@ -802,7 +804,7 @@ static void do_window_focus(char *message)
     ((focus_window_call) set_front_window_fp)(window_psn, wid);
 }
 
-static void do_window_shadow(char *message)
+ static void do_window_shadow(char *message)
 {
     uint32_t wid;
     unpack(wid);
@@ -811,12 +813,14 @@ static void do_window_shadow(char *message)
     bool value;
     unpack(value);
 
-    uint64_t tags = (1 << 3);
-    if (value == 1) {
-        SLSClearWindowTags(SLSMainConnectionID(), wid, &tags, 64);
-    } else {
-        SLSSetWindowTags(SLSMainConnectionID(), wid, &tags, 64);
-    }
+    float density = value ? 1.0f : 0.0f;
+    CFNumberRef densityRef = CFNumberCreate(NULL, kCFNumberFloatType, &density);
+    const void *keys[1] = { CFSTR("com.apple.WindowShadowDensity") };
+    const void *values[1] = { densityRef };
+    CFDictionaryRef options = CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    SLSWindowSetShadowProperties(wid, options);
+    CFRelease(densityRef);
+    CFRelease(options);
 }
 
 static void do_window_swap_proxy_in(char *message)
