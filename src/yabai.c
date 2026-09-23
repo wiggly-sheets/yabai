@@ -295,7 +295,7 @@ int main(int argc, char **argv)
     }
 
     if (!configure_settings_and_acquire_lock()) {
-        exit(0);
+        exit(1);
     }
 
     if (!event_loop_begin(&g_event_loop)) {

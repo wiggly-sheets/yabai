@@ -860,6 +860,10 @@ err:
 {
     CFTypeRef value = NULL;
     if (SLSCopyWindowProperty(g_connection, wid, CFSTR("com.apple.WindowShadowDensity"), &value) == kCGErrorSuccess && value) {
+        if (CFGetTypeID(value) != CFNumberGetTypeID()) {
+            CFRelease(value);
+            return true;
+        }
         float density = 0.0f;
         CFNumberGetValue((CFNumberRef)value, kCFNumberFloatType, &density);
         CFRelease(value);

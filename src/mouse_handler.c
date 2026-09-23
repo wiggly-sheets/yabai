@@ -298,7 +298,15 @@ bool mouse_handler_begin(struct mouse_state *mouse_state, uint32_t mask)
 
     mouse_state->runloop_source = CFMachPortCreateRunLoopSource(NULL, mouse_state->handle, 0);
     mouse_state->ready = dispatch_semaphore_create(0);
-    pthread_create(&mouse_state->thread, NULL, &mouse_handler_thread, mouse_state);
+    if (pthread_create(&mouse_state->thread, NULL, &mouse_handler_thread, mouse_state) != 0) {
+        warn("yabai: could not create mouse event handler thread!\n");
+        CFMachPortInvalidate(mouse_state->handle);
+        CFRelease(mouse_state->runloop_source);
+        CFRelease(mouse_state->handle);
+        __atomic_store_n(&mouse_state->handle, NULL, __ATOMIC_RELEASE);
+        dispatch_release(mouse_state->ready);
+        return false;
+    }
     dispatch_semaphore_wait(mouse_state->ready, DISPATCH_TIME_FOREVER);
     dispatch_release(mouse_state->ready);
 

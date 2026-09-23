@@ -16,7 +16,7 @@ static NSString *layout_store_resolve_path(const char *name_or_path, uint64_t si
     NSString *str = [NSString stringWithUTF8String:name_or_path];
     if ([str hasPrefix:@"~/"]) {
         return [home stringByAppendingPathComponent:[str substringFromIndex:2]];
-    } else if ([str hasPrefix:@"/"] || [str hasPrefix:@"."]) {
+    } else if ([str hasPrefix:@"/"]) {
         return str;
     } else {
         if (![str hasSuffix:@".json"]) {
@@ -38,7 +38,7 @@ static NSString *layout_store_resolve_session_path(const char *name_or_path)
     NSString *str = [NSString stringWithUTF8String:name_or_path];
     if ([str hasPrefix:@"~/"]) {
         return [home stringByAppendingPathComponent:[str substringFromIndex:2]];
-    } else if ([str hasPrefix:@"/"] || [str hasPrefix:@"."]) {
+    } else if ([str hasPrefix:@"/"]) {
         return str;
     } else {
         if (![str hasSuffix:@".json"]) {
@@ -54,7 +54,11 @@ static bool layout_store_ensure_dir(NSString *path)
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
-        return [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSError *err = nil;
+        if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err]) {
+            warn("yabai: could not create directory '%s': %s\n", [dir UTF8String], err ? [[err localizedDescription] UTF8String] : "unknown error");
+            return false;
+        }
     }
     return true;
 }

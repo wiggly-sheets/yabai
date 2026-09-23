@@ -228,10 +228,10 @@ void window_manager_set_focus_follows_mouse(struct window_manager *wm, enum ffm_
 {
     mouse_handler_end(&g_mouse_state);
 
-    if (mode == FFM_DISABLED) {
-        mouse_handler_begin(&g_mouse_state, MOUSE_EVENT_MASK);
-    } else {
-        mouse_handler_begin(&g_mouse_state, MOUSE_EVENT_MASK_FFM);
+    uint32_t mask = (mode == FFM_DISABLED) ? MOUSE_EVENT_MASK : MOUSE_EVENT_MASK_FFM;
+    if (!mouse_handler_begin(&g_mouse_state, mask)) {
+        warn("yabai: could not start mouse handler!\n");
+        return;
     }
 
     wm->ffm_mode = mode;
@@ -2277,7 +2277,7 @@ void window_manager_wait_for_native_fullscreen_transition(struct window *window)
         workspace_is_macos_sonoma() ||
         workspace_is_macos_sequoia() ||
         (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
-int timeout = 30;
+        int timeout = 30;
         while (!space_is_user(space_manager_active_space()) && --timeout > 0) {
 
             //

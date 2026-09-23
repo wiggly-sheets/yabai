@@ -844,6 +844,12 @@ static void do_window_focus(char *message)
     bool value;
     unpack(value);
 
+    // Clear the legacy shadow tag bit so windows toggled by older versions migrate correctly.
+    if (value) {
+        uint64_t tags = (1 << 3);
+        SLSClearWindowTags(SLSMainConnectionID(), wid, &tags, 64);
+    }
+
     float density = value ? 1.0f : 0.0f;
     CFNumberRef densityRef = CFNumberCreate(NULL, kCFNumberFloatType, &density);
     const void *keys[1] = { CFSTR("com.apple.WindowShadowDensity") };
