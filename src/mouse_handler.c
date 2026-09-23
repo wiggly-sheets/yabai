@@ -293,6 +293,7 @@ bool mouse_handler_begin(struct mouse_state *mouse_state, uint32_t mask)
     if (!CGEventTapIsEnabled(mouse_state->handle)) {
         CFMachPortInvalidate(mouse_state->handle);
         CFRelease(mouse_state->handle);
+        __atomic_store_n(&mouse_state->handle, NULL, __ATOMIC_RELEASE);
         return false;
     }
 
