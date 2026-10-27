@@ -700,6 +700,14 @@ static EVENT_HANDLER(WINDOW_FOCUSED)
     window_did_receive_focus(&g_window_manager, &g_mouse_state, window);
     event_signal_push(SIGNAL_WINDOW_FOCUSED, window);
     window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, g_space_manager.current_space_id);
+
+    if (window_space(window->id) == g_space_manager.current_space_id) {
+        struct view *view = space_manager_find_view(&g_space_manager, g_space_manager.current_space_id);
+        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+            view_update(view);
+            view_flush(view);
+        }
+    }
 }
 
 static EVENT_HANDLER(WINDOW_MOVED)

@@ -45,6 +45,7 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_WINDOW_GAP            "window_gap"
 #define COMMAND_CONFIG_SPLIT_RATIO           "split_ratio"
 #define COMMAND_CONFIG_SPLIT_TYPE            "split_type"
+#define COMMAND_CONFIG_SPLIT_ALGO            "split_algorithm"
 #define COMMAND_CONFIG_AUTO_BALANCE          "auto_balance"
 #define COMMAND_CONFIG_MOUSE_MOD             "mouse_modifier"
 #define COMMAND_CONFIG_MOUSE_ACTION1         "mouse_action1"
@@ -72,9 +73,17 @@ extern bool g_verbose;
 #define ARGUMENT_CONFIG_LAYOUT_BSP            "bsp"
 #define ARGUMENT_CONFIG_LAYOUT_STACK          "stack"
 #define ARGUMENT_CONFIG_LAYOUT_FLOAT          "float"
+#define ARGUMENT_CONFIG_LAYOUT_SCROLL         "scroll"
+#define ARGUMENT_CONFIG_LAYOUT_ACCORDION      "accordion"
 #define ARGUMENT_CONFIG_SPLIT_TYPE_Y          "vertical"
 #define ARGUMENT_CONFIG_SPLIT_TYPE_X          "horizontal"
 #define ARGUMENT_CONFIG_SPLIT_TYPE_AUTO       "auto"
+#define ARGUMENT_CONFIG_SPLIT_ALGO_LONGEST    "longest_side"
+#define ARGUMENT_CONFIG_SPLIT_ALGO_SHORTEST   "shortest_side"
+#define ARGUMENT_CONFIG_SPLIT_ALGO_ALTERNATE  "alternate_axis"
+#define ARGUMENT_CONFIG_SPLIT_ALGO_SPIRAL     "spiral"
+#define ARGUMENT_CONFIG_SPLIT_ALGO_DWINDLE    "dwindle"
+#define ARGUMENT_CONFIG_SPLIT_ALGO_GOLDEN     "golden"
 #define ARGUMENT_CONFIG_MOUSE_MOD_ALT         "alt"
 #define ARGUMENT_CONFIG_MOUSE_MOD_SHIFT       "shift"
 #define ARGUMENT_CONFIG_MOUSE_MOD_CMD         "cmd"
@@ -131,6 +140,8 @@ extern bool g_verbose;
 #define ARGUMENT_SPACE_LAYOUT_BSP   "bsp"
 #define ARGUMENT_SPACE_LAYOUT_STACK "stack"
 #define ARGUMENT_SPACE_LAYOUT_FLT   "float"
+#define ARGUMENT_SPACE_LAYOUT_SCROLL "scroll"
+#define ARGUMENT_SPACE_LAYOUT_ACCORDION "accordion"
 /* ----------------------------------------------------------------------------- */
 
 /* --------------------------------DOMAIN WINDOW-------------------------------- */
@@ -1530,6 +1541,24 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                     } else {
                         daemon_fail(rsp, "cannot set layout for a macOS fullscreen space!\n");
                     }
+                } else if (token_equals(value, ARGUMENT_CONFIG_LAYOUT_SCROLL)) {
+                    if (space_is_user(sel_sid)) {
+                        view_set_flag(view, VIEW_LAYOUT);
+                        view->layout = VIEW_SCROLL;
+                        view_clear(view);
+                        window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, sel_sid);
+                    } else {
+                        daemon_fail(rsp, "cannot set layout for a macOS fullscreen space!\n");
+                    }
+                } else if (token_equals(value, ARGUMENT_CONFIG_LAYOUT_ACCORDION)) {
+                    if (space_is_user(sel_sid)) {
+                        view_set_flag(view, VIEW_LAYOUT);
+                        view->layout = VIEW_ACCORDION;
+                        view_clear(view);
+                        window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, sel_sid);
+                    } else {
+                        daemon_fail(rsp, "cannot set layout for a macOS fullscreen space!\n");
+                    }
                 } else {
                     daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
                 }
@@ -1542,6 +1571,10 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                     space_manager_set_layout_for_all_spaces(&g_space_manager, VIEW_STACK);
                 } else if (token_equals(value, ARGUMENT_CONFIG_LAYOUT_FLOAT)) {
                     space_manager_set_layout_for_all_spaces(&g_space_manager, VIEW_FLOAT);
+                } else if (token_equals(value, ARGUMENT_CONFIG_LAYOUT_SCROLL)) {
+                    space_manager_set_layout_for_all_spaces(&g_space_manager, VIEW_SCROLL);
+                } else if (token_equals(value, ARGUMENT_CONFIG_LAYOUT_ACCORDION)) {
+                    space_manager_set_layout_for_all_spaces(&g_space_manager, VIEW_ACCORDION);
                 } else {
                     daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
                 }
@@ -1582,6 +1615,47 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                     space_manager_set_split_type_for_all_spaces(&g_space_manager, SPLIT_X);
                 } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_TYPE_AUTO)) {
                     space_manager_set_split_type_for_all_spaces(&g_space_manager, SPLIT_AUTO);
+                } else {
+                    daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+                }
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_SPLIT_ALGO)) {
+            struct token value = get_token(&message);
+            if (sel_sid) {
+                struct view *view = space_manager_find_view(&g_space_manager, sel_sid);
+                if (!token_is_valid(value)) {
+                    fprintf(rsp, "%s\n", split_algorithm_str[view->split_algorithm]);
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_LONGEST)) {
+                    view_set_flag(view, VIEW_SPLIT_ALGO);
+                    view->split_algorithm = SPLIT_ALGO_LONGEST_SIDE;
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_SHORTEST)) {
+                    view_set_flag(view, VIEW_SPLIT_ALGO);
+                    view->split_algorithm = SPLIT_ALGO_SHORTEST_SIDE;
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_ALTERNATE)) {
+                    view_set_flag(view, VIEW_SPLIT_ALGO);
+                    view->split_algorithm = SPLIT_ALGO_ALTERNATE;
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_SPIRAL) || token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_DWINDLE)) {
+                    view_set_flag(view, VIEW_SPLIT_ALGO);
+                    view->split_algorithm = SPLIT_ALGO_SPIRAL;
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_GOLDEN)) {
+                    view_set_flag(view, VIEW_SPLIT_ALGO);
+                    view->split_algorithm = SPLIT_ALGO_GOLDEN;
+                } else {
+                    daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+                }
+            } else {
+                if (!token_is_valid(value)) {
+                    fprintf(rsp, "%s\n", split_algorithm_str[g_space_manager.split_algorithm]);
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_LONGEST)) {
+                    space_manager_set_split_algorithm_for_all_spaces(&g_space_manager, SPLIT_ALGO_LONGEST_SIDE);
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_SHORTEST)) {
+                    space_manager_set_split_algorithm_for_all_spaces(&g_space_manager, SPLIT_ALGO_SHORTEST_SIDE);
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_ALTERNATE)) {
+                    space_manager_set_split_algorithm_for_all_spaces(&g_space_manager, SPLIT_ALGO_ALTERNATE);
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_SPIRAL) || token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_DWINDLE)) {
+                    space_manager_set_split_algorithm_for_all_spaces(&g_space_manager, SPLIT_ALGO_SPIRAL);
+                } else if (token_equals(value, ARGUMENT_CONFIG_SPLIT_ALGO_GOLDEN)) {
+                    space_manager_set_split_algorithm_for_all_spaces(&g_space_manager, SPLIT_ALGO_GOLDEN);
                 } else {
                     daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
                 }
@@ -2028,6 +2102,18 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             } else if (token_equals(value, ARGUMENT_SPACE_LAYOUT_FLT)) {
                 if (space_is_user(acting_sid)) {
                     space_manager_set_layout_for_space(&g_space_manager, acting_sid, VIEW_FLOAT);
+                } else {
+                    daemon_fail(rsp, "cannot set layout for a macOS fullscreen space!\n");
+                }
+            } else if (token_equals(value, ARGUMENT_SPACE_LAYOUT_SCROLL)) {
+                if (space_is_user(acting_sid)) {
+                    space_manager_set_layout_for_space(&g_space_manager, acting_sid, VIEW_SCROLL);
+                } else {
+                    daemon_fail(rsp, "cannot set layout for a macOS fullscreen space!\n");
+                }
+            } else if (token_equals(value, ARGUMENT_SPACE_LAYOUT_ACCORDION)) {
+                if (space_is_user(acting_sid)) {
+                    space_manager_set_layout_for_space(&g_space_manager, acting_sid, VIEW_ACCORDION);
                 } else {
                     daemon_fail(rsp, "cannot set layout for a macOS fullscreen space!\n");
                 }

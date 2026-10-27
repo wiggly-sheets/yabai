@@ -142,6 +142,24 @@ static const char *auto_balance_str[] = {
     "on"
 };
 
+enum split_algorithm
+{
+    SPLIT_ALGO_LONGEST_SIDE,
+    SPLIT_ALGO_SHORTEST_SIDE,
+    SPLIT_ALGO_ALTERNATE,
+    SPLIT_ALGO_SPIRAL,
+    SPLIT_ALGO_GOLDEN
+};
+
+static const char *split_algorithm_str[] =
+{
+    "longest_side",
+    "shortest_side",
+    "alternate_axis",
+    "spiral",
+    "golden"
+};
+
 struct feedback_window
 {
     uint32_t id;
@@ -171,7 +189,9 @@ enum view_type
     VIEW_DEFAULT,
     VIEW_BSP,
     VIEW_STACK,
-    VIEW_FLOAT
+    VIEW_FLOAT,
+    VIEW_SCROLL,
+    VIEW_ACCORDION
 };
 
 static const char *view_type_str[] =
@@ -179,7 +199,9 @@ static const char *view_type_str[] =
     "default",
     "bsp",
     "stack",
-    "float"
+    "float",
+    "scroll",
+    "accordion"
 };
 
 enum view_flag
@@ -196,6 +218,7 @@ enum view_flag
     VIEW_IS_VALID       = 0x200,
     VIEW_IS_DIRTY       = 0x400,
     VIEW_SPLIT_TYPE     = 0x800,
+    VIEW_SPLIT_ALGO     = 0x1000,
 };
 
 struct view
@@ -212,6 +235,9 @@ struct view
     int right_padding;
     int window_gap;
     uint32_t auto_balance;
+    float scroll_offset;
+    float column_width_ratio;
+    enum split_algorithm split_algorithm;
     uint64_t flags;
 };
 

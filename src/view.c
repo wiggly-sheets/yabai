@@ -133,6 +133,11 @@ static inline enum window_node_child window_node_get_child(struct window_node *n
     return node->child != CHILD_NONE ? node->child : g_space_manager.window_placement;
 }
 
+static inline enum split_algorithm view_effective_split_algorithm(struct view *view)
+{
+    return view_check_flag(view, VIEW_SPLIT_ALGO) ? view->split_algorithm : g_space_manager.split_algorithm;
+}
+
 static inline enum window_node_split window_node_get_split(struct view *view, struct window_node *node)
 {
     if (node->split != SPLIT_NONE) return node->split;
@@ -145,12 +150,38 @@ static inline enum window_node_split window_node_get_split(struct view *view, st
         return g_space_manager.split_type;
     }
 
-    return node->area.w >= node->area.h ? SPLIT_Y : SPLIT_X;
+    switch (view_effective_split_algorithm(view)) {
+    case SPLIT_ALGO_SHORTEST_SIDE: {
+        return node->area.w >= node->area.h ? SPLIT_X : SPLIT_Y;
+    }
+    case SPLIT_ALGO_ALTERNATE: {
+        if (node->parent && node->parent->split != SPLIT_NONE) {
+            return node->parent->split == SPLIT_Y ? SPLIT_X : SPLIT_Y;
+        }
+        return node->area.w >= node->area.h ? SPLIT_Y : SPLIT_X;
+    }
+    case SPLIT_ALGO_SPIRAL: {
+        int depth = 0;
+        for (struct window_node *p = node->parent; p; p = p->parent) ++depth;
+        return (depth % 2 == 0) ? SPLIT_Y : SPLIT_X;
+    }
+    case SPLIT_ALGO_GOLDEN:
+    case SPLIT_ALGO_LONGEST_SIDE:
+    default: {
+        return node->area.w >= node->area.h ? SPLIT_Y : SPLIT_X;
+    }
+    }
 }
 
-static inline float window_node_get_ratio(struct window_node *node)
+static inline float window_node_get_ratio(struct view *view, struct window_node *node)
 {
-    return in_range_ii(node->ratio, 0.1f, 0.9f) ? node->ratio : g_space_manager.split_ratio;
+    if (in_range_ii(node->ratio, 0.1f, 0.9f)) return node->ratio;
+
+    switch (view_effective_split_algorithm(view)) {
+    case SPLIT_ALGO_SPIRAL: return 0.5f;
+    case SPLIT_ALGO_GOLDEN: return 0.618f;
+    default: return g_space_manager.split_ratio;
+    }
 }
 
 static inline int window_node_get_gap(struct view *view)
@@ -186,7 +217,7 @@ static void area_make_pair(enum window_node_split split, int gap, float ratio, s
 static void area_make_pair_for_node(struct view *view, struct window_node *node)
 {
     enum window_node_split split = window_node_get_split(view, node);
-    float ratio = window_node_get_ratio(node);
+    float ratio = window_node_get_ratio(view, node);
     int gap     = window_node_get_gap(view);
 
     area_make_pair(split, gap, ratio, &node->area, &node->left->area, &node->right->area);
@@ -321,8 +352,101 @@ static void window_node_split(struct view *view, struct window_node *node, struc
     area_make_pair_for_node(view, node);
 }
 
+#define ACCORDION_RIBBON 24
+
+static inline float view_column_width(struct view *view)
+{
+    float ratio = in_range_ii(view->column_width_ratio, 0.1f, 0.9f) ? view->column_width_ratio : 0.5f;
+    return view->root->area.w * ratio;
+}
+
+static void view_layout_scroll(struct view *view)
+{
+    /* shortcut: no animation, no per-column width presets, fixed ratio for all columns */
+    if (window_node_is_leaf(view->root)) {
+        /* single window keeps the full root area */
+        if (window_node_is_occupied(view->root) && view->root->insert_dir) insert_feedback_show(view->root);
+        return;
+    }
+
+    float col_w = view_column_width(view);
+    int gap = window_node_get_gap(view);
+    int count = 0, focused = -1;
+
+    for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
+        if (!window_node_is_occupied(node)) continue;
+        if (window_node_contains_window(node, g_window_manager.focused_window_id)) focused = count;
+        ++count;
+    }
+    if (!count) return;
+    if (focused < 0) focused = 0;
+    if (view->scroll_offset < 0) view->scroll_offset = 0;
+
+    float fx = focused * (col_w + gap);
+    if (fx < view->scroll_offset) {
+        view->scroll_offset = fx;
+    } else if (fx + col_w > view->scroll_offset + view->root->area.w) {
+        view->scroll_offset = fx + col_w - view->root->area.w;
+    }
+
+    float max_offset = count * (col_w + gap) - gap - view->root->area.w;
+    if (max_offset < 0) max_offset = 0;
+    if (view->scroll_offset > max_offset) view->scroll_offset = max_offset;
+
+    int i = 0;
+    for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
+        if (!window_node_is_occupied(node)) continue;
+        node->area.x = view->root->area.x - view->scroll_offset + i * (col_w + gap);
+        node->area.y = view->root->area.y;
+        node->area.w = col_w;
+        node->area.h = view->root->area.h;
+        if (node->insert_dir) insert_feedback_show(node);
+        ++i;
+    }
+}
+
+static void view_layout_accordion(struct view *view)
+{
+    /* shortcut: no animation, fixed 24px ribbon, tatami/three-column deferred */
+    if (window_node_is_leaf(view->root) && !window_node_is_occupied(view->root)) return;
+
+    int count = 0, focused = -1;
+    for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
+        if (!window_node_is_occupied(node)) continue;
+        if (window_node_contains_window(node, g_window_manager.focused_window_id)) focused = count;
+        ++count;
+    }
+    if (!count) return;
+    if (focused < 0) focused = 0;
+
+    float y = view->root->area.y;
+    int i = 0;
+    for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
+        if (!window_node_is_occupied(node)) continue;
+        float h = (count == 1) ? view->root->area.h
+                : (i == focused) ? view->root->area.h - (count - 1) * ACCORDION_RIBBON
+                : ACCORDION_RIBBON;
+        if (h < 0) h = 0;
+        node->area.x = view->root->area.x;
+        node->area.y = y;
+        node->area.w = view->root->area.w;
+        node->area.h = h;
+        y += h;
+        if (node->insert_dir) insert_feedback_show(node);
+        ++i;
+    }
+}
+
 void window_node_update(struct view *view, struct window_node *node)
 {
+    if (view->layout == VIEW_SCROLL) {
+        view_layout_scroll(view);
+        return;
+    }
+    if (view->layout == VIEW_ACCORDION) {
+        view_layout_accordion(view);
+        return;
+    }
     if (window_node_is_leaf(node)) {
         if (node->insert_dir) insert_feedback_show(node);
     } else {
@@ -724,6 +848,11 @@ struct window_node *view_remove_window_node(struct view *view, struct window *wi
         return view->root;
     }
 
+    if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+        view_update(view);
+        return view->root;
+    }
+
     return parent;
 }
 
@@ -756,7 +885,7 @@ struct window_node *view_add_window_node_with_insertion_point(struct view *view,
         view->root->window_order[0] = window->id;
         view->root->window_count = 1;
         return view->root;
-    } else if (view->layout == VIEW_BSP) {
+    } else if (view->layout == VIEW_BSP || view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
         uint32_t prev_insertion_point = 0;
         struct window_node *leaf = NULL;
 
@@ -796,7 +925,9 @@ struct window_node *view_add_window_node_with_insertion_point(struct view *view,
 
         window_node_split(view, leaf, window);
 
-        if (view->auto_balance != SPLIT_NONE) {
+        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+            view_update(view);
+        } else if (view->auto_balance != SPLIT_NONE) {
             window_node_balance(view->root, view->auto_balance);
             view_update(view);
             return view->root;
@@ -1006,6 +1137,9 @@ struct view *view_create(uint64_t sid)
         if (!view_check_flag(view, VIEW_WINDOW_GAP))     view->window_gap     = g_space_manager.window_gap;
         if (!view_check_flag(view, VIEW_AUTO_BALANCE))   view->auto_balance   = g_space_manager.auto_balance;
         if (!view_check_flag(view, VIEW_SPLIT_TYPE))     view->split_type     = g_space_manager.split_type;
+        if (!view_check_flag(view, VIEW_SPLIT_ALGO))     view->split_algorithm = g_space_manager.split_algorithm;
+        view->column_width_ratio = 0.5f;
+        view->scroll_offset = 0;
         view_update(view);
     } else {
         view->layout = VIEW_FLOAT;
@@ -1026,6 +1160,7 @@ void view_clear(struct view *view)
 
         insert_feedback_destroy(view->root);
         memset(view->root, 0, sizeof(struct window_node));
+        view->scroll_offset = 0;
         view_update(view);
     }
 }

@@ -21,6 +21,7 @@ struct space_manager
     int window_gap;
     float split_ratio;
     enum window_node_split split_type;
+    enum split_algorithm split_algorithm;
     enum window_node_child window_placement;
     enum window_insertion_point window_insertion_point;
     bool window_zoom_persist;
@@ -83,6 +84,7 @@ void space_manager_set_bottom_padding_for_all_spaces(struct space_manager *sm, i
 void space_manager_set_left_padding_for_all_spaces(struct space_manager *sm, int left_padding);
 void space_manager_set_right_padding_for_all_spaces(struct space_manager *sm, int right_padding);
 void space_manager_set_split_type_for_all_spaces(struct space_manager *sm, enum window_node_split split_type);
+void space_manager_set_split_algorithm_for_all_spaces(struct space_manager *sm, enum split_algorithm split_algorithm);
 void space_manager_set_auto_balance_for_all_spaces(struct space_manager *sm, uint32_t auto_balance);
 bool space_manager_set_padding_for_space(struct space_manager *sm, uint64_t sid, int type, int top, int bottom, int left, int right);
 bool space_manager_toggle_padding_for_space(struct space_manager *sm, uint64_t sid);

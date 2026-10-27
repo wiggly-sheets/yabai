@@ -343,6 +343,16 @@ void space_manager_set_split_type_for_all_spaces(struct space_manager *sm, enum 
     })
 }
 
+void space_manager_set_split_algorithm_for_all_spaces(struct space_manager *sm, enum split_algorithm split_algorithm)
+{
+    sm->split_algorithm = split_algorithm;
+    table_for (struct view *view, sm->view, {
+        if (!view_check_flag(view, VIEW_SPLIT_ALGO)) {
+            view->split_algorithm = split_algorithm;
+        }
+    })
+}
+
 void space_manager_set_auto_balance_for_all_spaces(struct space_manager *sm, uint32_t auto_balance)
 {
     sm->auto_balance = auto_balance;
@@ -451,7 +461,11 @@ struct view *space_manager_tile_window_on_space_with_insertion_point(struct spac
     assert(node);
 
     if (space_is_visible(view->sid)) {
-        window_node_flush(node);
+        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+            window_node_flush(view->root);
+        } else {
+            window_node_flush(node);
+        }
     } else {
         view_set_flag(view, VIEW_IS_DIRTY);
     }
@@ -1205,6 +1219,7 @@ void space_manager_begin(struct space_manager *sm)
     sm->split_ratio = 0.5f;
     sm->auto_balance = SPLIT_NONE;
     sm->split_type = SPLIT_AUTO;
+    sm->split_algorithm = SPLIT_ALGO_LONGEST_SIDE;
     sm->window_placement = CHILD_SECOND;
     sm->window_insertion_point = INSERT_FOCUSED;
     sm->window_zoom_persist = true;
