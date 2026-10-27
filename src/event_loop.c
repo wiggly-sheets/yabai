@@ -1378,11 +1378,17 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
             }
 
             if (direction != 0) {
+                /* live drag must not spawn animation machinery per drag event */
+                float animation_duration = g_window_manager.window_animation_duration;
+                g_window_manager.window_animation_duration = 0.0f;
                 enum window_op_error err = window_manager_resize_window_relative(&g_window_manager, g_mouse_state.window, direction, dx, dy, false);
+                g_window_manager.window_animation_duration = animation_duration;
                 if (err == WINDOW_OP_ERROR_SUCCESS) {
                     g_mouse_state.live_resized = true;
                 } else {
-                    window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, g_mouse_state.direction, dx, dy, false);
+                    /* free resize leaves the tile grid, so mouse-up must adjust it */
+                    g_mouse_state.live_resized = false;
+                    window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, direction, dx, dy, false);
                 }
             }
         } else {
