@@ -242,9 +242,9 @@ static bool verify_os_version(NSOperatingSystemVersion os_version)
         return true; // Tahoe preview
     } else if (os_version.majorVersion == 27) {
 
-NSLog(@"[yabai-sa] Detected Golden Gate Developer Beta (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b)... flagging 'macOSSequoia=true.'");
+        NSLog(@"[yabai-sa] Detected Golden Gate (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b, 26A428, 26A434, 26B123)... flagging 'macOSSequoia=true.'");
         macOSSequoia = true;
-        return true; // Golden Gate Developer Beta (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b)
+        return true; // Golden Gate (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b, 26A428, 26A434, 26B123)
     }
 
     NSLog(@"[yabai-sa] spaces functionality is only supported on macOS Big Sur 11.0.0+, Monterey 12.0.0+, Ventura 13.0.0+, Sonoma 14.0.0+, Sequoia 15.0, Tahoe 26.0, and Golden Gate 27.0");
@@ -265,9 +265,9 @@ NSLog(@"[yabai-sa] Detected Golden Gate Developer Beta (26A5353q, 26A5368g, 26A5
         return true; // Tahoe preview
     } else if (os_version.majorVersion == 27) {
 
-NSLog(@"[yabai-sa] Detected Golden Gate Developer Beta (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b)... flagging 'macOSSequoia=true.'");
+        NSLog(@"[yabai-sa] Detected Golden Gate (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b, 26A428, 26A434, 26B123)... flagging 'macOSSequoia=true.'");
         macOSSequoia = true;
-        return true; // Golden Gate Developer Beta (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b)
+        return true; // Golden Gate (26A5353q, 26A5368g, 26A5378j, 26A5378n, 26A5388g, 26A5406e, 26A5416b, 26A428, 26A434, 26B123)
     }
 
     NSLog(@"[yabai-sa] spaces functionality is only supported on macOS Monterey 12.0.0+, Ventura 13.0.0+, Sonoma 14.0.0+, Sequoia 15.0, Tahoe 26.0, and Golden Gate 27.0");
@@ -442,17 +442,6 @@ static inline id get_current_space_for_display_space(id display_space)
     return space;
 }
 
-static inline id current_space_for_display(CFStringRef display_uuid)
-{
-    if ([dock_spaces respondsToSelector:@selector(currentSpaceForDisplay:)]) {
-        return ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplay:), display_uuid);
-    } else if (macOSSequoia) {
-        return ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplayUUID:), display_uuid);
-    } else {
-        return ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceforDisplayUUID:), display_uuid);
-    }
-}
-
 static inline id display_space_for_display_uuid(CFStringRef display_uuid)
 {
     NSArray *display_spaces = get_ivar_value(dock_spaces, "_displaySpaces");
@@ -604,7 +593,16 @@ static void do_space_focus(char *message)
 
     if (dest_space_id) {
         CFStringRef dest_display = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), dest_space_id);
-        id source_space = current_space_for_display(dest_display);
+        id source_space;
+        if (macOSSequoia && ![dock_spaces respondsToSelector:@selector(currentSpaceForDisplayUUID:)]) {
+            // NOTE: macOS 27.2 replaced currentSpaceForDisplayUUID: with currentSpaceForDisplay:, which takes a CGDirectDisplayID.
+            unsigned dest_display_id = ((unsigned (*)(id, SEL, uint64_t)) objc_msgSend)(dock_spaces, @selector(displayForSPID:), dest_space_id);
+            source_space = ((id (*)(id, SEL, unsigned)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplay:), dest_display_id);
+        } else {
+            source_space = macOSSequoia
+                         ? ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplayUUID:), dest_display)
+                         : ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceforDisplayUUID:), dest_display);
+        }
         uint64_t source_space_id = get_space_id(source_space);
         if (source_space_id == 0) {
             source_space_id = SLSManagedDisplayGetCurrentSpace(SLSMainConnectionID(), dest_display);
