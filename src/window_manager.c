@@ -373,7 +373,7 @@ void window_manager_resize_window_relative_internal(struct window *window, CGRec
     }
 }
 
-static bool window_node_is_ancestor(struct window_node *node, struct window_node *descendant)
+bool window_node_is_ancestor(struct window_node *node, struct window_node *descendant)
 {
     for (struct window_node *parent = descendant->parent; parent; parent = parent->parent) {
         if (parent == node) return true;
@@ -415,11 +415,26 @@ enum window_op_error window_manager_resize_window_relative(struct window_manager
         view_update(view);
 
         if (space_is_visible(view->sid)) {
-            /* both fences lie on the dragged node's ancestor chain, so the shallower fence covers the other's subtree */
-            struct window_node *flush_node = x_fence;
-            if (!flush_node || (y_fence && window_node_is_ancestor(y_fence, x_fence))) flush_node = y_fence;
-            window_node_flush(flush_node);
-            view_clear_flag(view, VIEW_IS_DIRTY);
+            /* flush only the windows that actually moved */
+            bool x_changed = direction & (HANDLE_TOP | HANDLE_BOTTOM);
+            bool y_changed = direction & (HANDLE_LEFT | HANDLE_RIGHT);
+
+            struct window_node *flush_node;
+            if (x_changed && y_changed) {
+                /* corner drag: both ratios changed, both fences lie on the dragged
+                 * node's ancestor chain so the shallower covers the other's subtree */
+                flush_node = x_fence;
+                if (!flush_node || (y_fence && window_node_is_ancestor(y_fence, x_fence))) flush_node = y_fence;
+            } else if (x_changed) {
+                flush_node = x_fence;
+            } else {
+                flush_node = y_fence;
+            }
+
+            if (flush_node) {
+                window_node_flush(flush_node);
+                view_clear_flag(view, VIEW_IS_DIRTY);
+            }
         }
     } else {
         if (direction == HANDLE_ABS) {
