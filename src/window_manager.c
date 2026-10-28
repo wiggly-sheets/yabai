@@ -1029,7 +1029,12 @@ struct window *window_manager_find_prev_managed_window(struct space_manager *sm,
     if (!node) return NULL;
 
     struct window_node *prev = window_node_find_prev_leaf(node);
-    if (!prev) return NULL;
+    if (!prev) {
+        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+            prev = window_node_find_last_leaf(view->root);
+        }
+        if (!prev) return NULL;
+    }
 
     return window_manager_find_window(wm, prev->window_order[0]);
 }
@@ -1043,7 +1048,12 @@ struct window *window_manager_find_next_managed_window(struct space_manager *sm,
     if (!node) return NULL;
 
     struct window_node *next = window_node_find_next_leaf(node);
-    if (!next) return NULL;
+    if (!next) {
+        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+            next = window_node_find_first_leaf(view->root);
+        }
+        if (!next) return NULL;
+    }
 
     return window_manager_find_window(wm, next->window_order[0]);
 }
