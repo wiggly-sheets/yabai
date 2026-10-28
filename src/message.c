@@ -118,6 +118,7 @@ extern bool g_verbose;
 #define COMMAND_SPACE_BALANCE  "--balance"
 #define COMMAND_SPACE_MIRROR   "--mirror"
 #define COMMAND_SPACE_ROTATE   "--rotate"
+#define COMMAND_SPACE_SCROLL   "--scroll"
 #define COMMAND_SPACE_PADDING  "--padding"
 #define COMMAND_SPACE_GAP      "--gap"
 #define COMMAND_SPACE_TOGGLE   "--toggle"
@@ -2064,6 +2065,20 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             } else if (token_equals(value, ARGUMENT_SPACE_ROTATE_270)) {
                 if (!space_manager_rotate_space(&g_space_manager, acting_sid, 270)) {
                     daemon_fail(rsp, "cannot rotate a non-managed space.\n");
+                }
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_SPACE_SCROLL)) {
+            int columns;
+            struct token value = get_token(&message);
+            if (sscanf(value.text, "%d", &columns) == 1) {
+                struct view *view = space_manager_find_view(&g_space_manager, acting_sid);
+                if (view->layout != VIEW_SCROLL) {
+                    daemon_fail(rsp, "cannot scroll a space that is not using the scroll layout.\n");
+                } else {
+                    view_scroll_by(view, columns);
+                    view_flush(view);
                 }
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);

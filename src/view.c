@@ -360,6 +360,25 @@ static inline float view_column_width(struct view *view)
     return view->root->area.w * ratio;
 }
 
+static void view_scroll_apply(struct view *view, float col_w, int gap, int count)
+{
+    float max_offset = count * (col_w + gap) - gap - view->root->area.w;
+    if (max_offset < 0) max_offset = 0;
+    if (view->scroll_offset < 0) view->scroll_offset = 0;
+    if (view->scroll_offset > max_offset) view->scroll_offset = max_offset;
+
+    int i = 0;
+    for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
+        if (!window_node_is_occupied(node)) continue;
+        node->area.x = view->root->area.x - view->scroll_offset + i * (col_w + gap);
+        node->area.y = view->root->area.y;
+        node->area.w = col_w;
+        node->area.h = view->root->area.h;
+        if (node->insert_dir) insert_feedback_show(node);
+        ++i;
+    }
+}
+
 static void view_layout_scroll(struct view *view)
 {
     /* shortcut: no animation, no per-column width presets, fixed ratio for all columns */
@@ -389,20 +408,26 @@ static void view_layout_scroll(struct view *view)
         view->scroll_offset = fx + col_w - view->root->area.w;
     }
 
-    float max_offset = count * (col_w + gap) - gap - view->root->area.w;
-    if (max_offset < 0) max_offset = 0;
-    if (view->scroll_offset > max_offset) view->scroll_offset = max_offset;
+    view_scroll_apply(view, col_w, gap, count);
+}
 
-    int i = 0;
+void view_scroll_by(struct view *view, int columns)
+{
+    if (view->layout != VIEW_SCROLL) return;
+    if (window_node_is_leaf(view->root)) return;
+
+    float col_w = view_column_width(view);
+    int gap = window_node_get_gap(view);
+    int count = 0;
+
     for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
         if (!window_node_is_occupied(node)) continue;
-        node->area.x = view->root->area.x - view->scroll_offset + i * (col_w + gap);
-        node->area.y = view->root->area.y;
-        node->area.w = col_w;
-        node->area.h = view->root->area.h;
-        if (node->insert_dir) insert_feedback_show(node);
-        ++i;
+        ++count;
     }
+    if (!count) return;
+
+    view->scroll_offset += columns * (col_w + gap);
+    view_scroll_apply(view, col_w, gap, count);
 }
 
 static void view_layout_accordion(struct view *view)

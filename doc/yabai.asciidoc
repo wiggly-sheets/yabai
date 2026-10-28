@@ -349,6 +349,11 @@ COMMAND
 *--rotate* '90|180|270'::
     Rotate the tree of the selected space.
 
+*--scroll* '<COLUMNS>'::
+    Scroll a space using the 'scroll' layout by the given number of columns, without changing focus. +
+    Positive values scroll towards later columns, negative values towards earlier ones. +
+    The next focus change re-centers the strip on the focused window and overrides the manual offset.
+
 *--padding* 'abs|rel:<top>:<bottom>:<left>:<right>'::
     Padding added at the sides of the selected space.
 

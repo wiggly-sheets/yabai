@@ -271,6 +271,7 @@ bool view_is_invalid(struct view *view);
 bool view_is_dirty(struct view *view);
 void view_flush(struct view *view);
 void view_update(struct view *view);
+void view_scroll_by(struct view *view, int columns);
 struct view *view_create(uint64_t sid);
 void view_destroy(struct view *view);
 void view_clear(struct view *view);
