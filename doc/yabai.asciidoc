@@ -242,6 +242,9 @@ Global Settings
 *mouse_edge_resize* ['on|off']::
     Enable or disable plain left-drag resize inside the 12px strip along a window edge when no 'mouse_modifier' is held. Defaults to 'on'.
 
+*focus_loop* ['on|off']::
+    Enable or disable wrap-around focus movement in scroll and accordion layouts. Defaults to 'on'.
+
 Space Settings
 ^^^^^^^^^^^^^^
 

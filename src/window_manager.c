@@ -1030,7 +1030,7 @@ struct window *window_manager_find_prev_managed_window(struct space_manager *sm,
 
     struct window_node *prev = window_node_find_prev_leaf(node);
     if (!prev) {
-        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+        if (g_window_manager.focus_loop && (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION)) {
             prev = window_node_find_last_leaf(view->root);
         }
         if (!prev) return NULL;
@@ -1049,7 +1049,7 @@ struct window *window_manager_find_next_managed_window(struct space_manager *sm,
 
     struct window_node *next = window_node_find_next_leaf(node);
     if (!next) {
-        if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
+        if (g_window_manager.focus_loop && (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION)) {
             next = window_node_find_first_leaf(view->root);
         }
         if (!next) return NULL;
@@ -2823,6 +2823,7 @@ void window_manager_init(struct window_manager *wm)
     wm->window_origin_mode = WINDOW_ORIGIN_DEFAULT;
     wm->enable_mff = false;
     wm->mouse_edge_resize = true;
+    wm->focus_loop = true;
     wm->enable_window_opacity = false;
     wm->menubar_opacity = 1.0f;
     wm->active_window_opacity = 1.0f;
