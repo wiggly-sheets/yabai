@@ -224,6 +224,9 @@ Global Settings
 *scroll_reversed* ['on|off']::
     Reverse the column order of the 'scroll' layout, so the first window is rightmost. Defaults to 'off'.
 
+*accordion_ribbon_width* '<INTEGER>'::
+    Width in pixels of the collapsed windows (the ribbon) in spaces using the 'accordion' layout. Defaults to 24.
+
 *mouse_modifier* ['cmd|alt|shift|ctrl|fn']::
     Keyboard modifier used for moving and resizing windows.
 

@@ -2781,6 +2781,7 @@ void window_manager_init(struct window_manager *wm)
     wm->insert_feedback_color = rgba_color_from_hex(0xffd75f5f);
     wm->scroll_column_width = 0.5f;
     wm->scroll_reversed = false;
+    wm->accordion_ribbon_width = 24;
 
     table_init(&wm->application, 150, hash_wm, compare_wm);
     table_init(&wm->window, 150, hash_wm, compare_wm);

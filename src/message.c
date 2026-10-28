@@ -49,6 +49,7 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_AUTO_BALANCE          "auto_balance"
 #define COMMAND_CONFIG_SCROLL_COLUMN_WIDTH   "scroll_column_width"
 #define COMMAND_CONFIG_SCROLL_REVERSED       "scroll_reversed"
+#define COMMAND_CONFIG_ACCORDION_RIBBON_WIDTH "accordion_ribbon_width"
 #define COMMAND_CONFIG_MOUSE_MOD             "mouse_modifier"
 #define COMMAND_CONFIG_MOUSE_ACTION1         "mouse_action1"
 #define COMMAND_CONFIG_MOUSE_ACTION2         "mouse_action2"
@@ -1611,6 +1612,15 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                 g_window_manager.scroll_reversed = true;
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_ACCORDION_RIBBON_WIDTH)) {
+            struct token_value value = token_to_value(get_token(&message));
+            if (value.type == TOKEN_TYPE_INVALID) {
+                fprintf(rsp, "%d\n", g_window_manager.accordion_ribbon_width);
+            } else if (value.type == TOKEN_TYPE_INT) {
+                g_window_manager.accordion_ribbon_width = value.int_value;
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.token.length, value.token.text, command.length, command.text, domain.length, domain.text);
             }
         } else if (token_equals(command, COMMAND_CONFIG_SPLIT_TYPE)) {
             struct token value = get_token(&message);

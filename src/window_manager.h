@@ -102,6 +102,7 @@ struct window_manager
     struct rgba_color insert_feedback_color;
     float scroll_column_width;
     bool scroll_reversed;
+    int accordion_ribbon_width;
     struct scratchpad *scratchpad_window;
 };
 

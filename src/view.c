@@ -352,8 +352,6 @@ static void window_node_split(struct view *view, struct window_node *node, struc
     area_make_pair_for_node(view, node);
 }
 
-#define ACCORDION_RIBBON 24
-
 static inline float view_column_width(struct view *view)
 {
     float ratio = in_range_ii(g_window_manager.scroll_column_width, 0.1f, 0.9f) ? g_window_manager.scroll_column_width : 0.5f;
@@ -433,9 +431,10 @@ void view_scroll_by(struct view *view, int columns)
 
 static void view_layout_accordion(struct view *view)
 {
-    /* shortcut: no animation, fixed 24px ribbon, tatami/three-column deferred */
+    /* shortcut: no animation, tatami/three-column deferred */
     if (window_node_is_leaf(view->root) && !window_node_is_occupied(view->root)) return;
 
+    int ribbon = g_window_manager.accordion_ribbon_width;
     int count = 0, focused = -1;
     for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
         if (!window_node_is_occupied(node)) continue;
@@ -450,8 +449,8 @@ static void view_layout_accordion(struct view *view)
     for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
         if (!window_node_is_occupied(node)) continue;
         float h = (count == 1) ? view->root->area.h
-                : (i == focused) ? view->root->area.h - (count - 1) * ACCORDION_RIBBON
-                : ACCORDION_RIBBON;
+                : (i == focused) ? view->root->area.h - (count - 1) * ribbon
+                : ribbon;
         if (h < 0) h = 0;
         node->area.x = view->root->area.x;
         node->area.y = y;
