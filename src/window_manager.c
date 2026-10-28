@@ -373,6 +373,15 @@ void window_manager_resize_window_relative_internal(struct window *window, CGRec
     }
 }
 
+static bool window_node_is_ancestor(struct window_node *node, struct window_node *descendant)
+{
+    for (struct window_node *parent = descendant->parent; parent; parent = parent->parent) {
+        if (parent == node) return true;
+    }
+
+    return false;
+}
+
 enum window_op_error window_manager_resize_window_relative(struct window_manager *wm, struct window *window, int direction, float dx, float dy, bool animate)
 {
     TIME_FUNCTION;
@@ -404,7 +413,14 @@ enum window_op_error window_manager_resize_window_relative(struct window_manager
         }
 
         view_update(view);
-        view_flush(view);
+
+        if (space_is_visible(view->sid)) {
+            /* both fences lie on the dragged node's ancestor chain, so the shallower fence covers the other's subtree */
+            struct window_node *flush_node = x_fence;
+            if (!flush_node || (y_fence && window_node_is_ancestor(y_fence, x_fence))) flush_node = y_fence;
+            window_node_flush(flush_node);
+            view_clear_flag(view, VIEW_IS_DIRTY);
+        }
     } else {
         if (direction == HANDLE_ABS) {
             if (animate) {
