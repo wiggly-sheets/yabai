@@ -2029,6 +2029,51 @@ enum window_op_error window_manager_swap_window(struct space_manager *sm, struct
         return WINDOW_OP_ERROR_SUCCESS;
     }
 
+    bool a_visible = space_is_visible(a_view->sid);
+    bool b_visible = space_is_visible(b_view->sid);
+
+    if (a_view->layout == VIEW_SCROLL || a_view->layout == VIEW_ACCORDION) {
+        if (b_view->layout != a_view->layout) return WINDOW_OP_ERROR_INVALID_DST_VIEW;
+
+        if (window_node_contains_window(a_node, a_view->insertion_point)) {
+            a_view->insertion_point = b->id;
+        } else if (window_node_contains_window(b_node, b_view->insertion_point)) {
+            b_view->insertion_point = a->id;
+        }
+
+        if (a_view->sid != b_view->sid) {
+            for (int i = 0; i < a_node->window_count; ++i) {
+                struct window *window = window_manager_find_window(wm, a_node->window_list[i]);
+                window_manager_remove_managed_window(wm, a_node->window_list[i]);
+                space_manager_move_window_to_space(b_view->sid, window);
+                window_manager_add_managed_window(wm, window, b_view);
+            }
+
+            for (int i = 0; i < b_node->window_count; ++i) {
+                struct window *window = window_manager_find_window(wm, b_node->window_list[i]);
+                window_manager_remove_managed_window(wm, b_node->window_list[i]);
+                space_manager_move_window_to_space(a_view->sid, window);
+                window_manager_add_managed_window(wm, window, a_view);
+            }
+
+            if (a_visible && !b_visible && a->id == wm->focused_window_id) {
+                window_manager_focus_window_with_raise(&b->application->psn, b->id, b->ref);
+            } else if (b_visible && !a_visible && b->id == wm->focused_window_id) {
+                window_manager_focus_window_with_raise(&a->application->psn, a->id, a->ref);
+            }
+        }
+
+        window_node_swap_window_list(a_node, b_node);
+        view_update(a_view);
+        view_update(b_view);
+
+        struct window_capture *window_list = NULL;
+        window_node_capture_windows(a_node, &window_list);
+        window_node_capture_windows(b_node, &window_list);
+        window_manager_animate_window_list(window_list, ts_buf_len(window_list));
+        return WINDOW_OP_ERROR_SUCCESS;
+    }
+
     if (a_view->layout != VIEW_BSP) return WINDOW_OP_ERROR_INVALID_SRC_VIEW;
     if (b_view->layout != VIEW_BSP) return WINDOW_OP_ERROR_INVALID_DST_VIEW;
 
@@ -2037,9 +2082,6 @@ enum window_op_error window_manager_swap_window(struct space_manager *sm, struct
     } else if (window_node_contains_window(b_node, b_view->insertion_point)) {
         b_view->insertion_point = a->id;
     }
-
-    bool a_visible = space_is_visible(a_view->sid);
-    bool b_visible = space_is_visible(b_view->sid);
 
     if (a_view->sid != b_view->sid) {
         for (int i = 0; i < a_node->window_count; ++i) {

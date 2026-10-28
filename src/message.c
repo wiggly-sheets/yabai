@@ -2378,9 +2378,9 @@ static void handle_domain_window(FILE *rsp, struct token domain, char *message)
             if (selector.did_parse && selector.window) {
                 enum window_op_error result = window_manager_swap_window(&g_space_manager, &g_window_manager, acting_window, selector.window);
                 if (result == WINDOW_OP_ERROR_INVALID_SRC_VIEW) {
-                    daemon_fail(rsp, "the acting window is not within a bsp space.\n");
+                    daemon_fail(rsp, "the acting window is not within a managed space.\n");
                 } else if (result == WINDOW_OP_ERROR_INVALID_DST_VIEW) {
-                    daemon_fail(rsp, "the selected window is not within a bsp space.\n");
+                    daemon_fail(rsp, "the selected window is not within a managed space.\n");
                 } else if (result == WINDOW_OP_ERROR_INVALID_SRC_NODE) {
                     daemon_fail(rsp, "the acting window is not managed.\n");
                 } else if (result == WINDOW_OP_ERROR_INVALID_DST_NODE) {

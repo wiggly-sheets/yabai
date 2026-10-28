@@ -175,6 +175,12 @@ void mouse_drop_action_swap(struct window_manager *wm, struct view *src_view, st
     struct window_capture *window_list = NULL;
     window_node_capture_windows(src_node, &window_list);
     window_node_capture_windows(dst_node, &window_list);
+
+    if (src_view->layout == VIEW_SCROLL || src_view->layout == VIEW_ACCORDION) {
+        view_update(src_view);
+        view_update(dst_view);
+    }
+
     window_manager_animate_window_list(window_list, ts_buf_len(window_list));
 }
 
