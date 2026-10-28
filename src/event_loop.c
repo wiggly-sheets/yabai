@@ -1220,7 +1220,8 @@ static EVENT_HANDLER(MOUSE_DOWN)
         g_mouse_state.current_action = g_mouse_state.action2;
     }
 
-    if (g_mouse_state.current_action == MOUSE_MODE_NONE && button == kCGMouseButtonLeft && mod == 0) {
+    if (g_window_manager.mouse_edge_resize &&
+        g_mouse_state.current_action == MOUSE_MODE_NONE && button == kCGMouseButtonLeft && mod == 0) {
         CGRect f = g_mouse_state.window_frame;
         if (point.x <= f.origin.x + EDGE_RESIZE_THRESHOLD ||
             point.x >= f.origin.x + f.size.width - EDGE_RESIZE_THRESHOLD ||

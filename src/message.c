@@ -51,6 +51,7 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_MOUSE_ACTION1         "mouse_action1"
 #define COMMAND_CONFIG_MOUSE_ACTION2         "mouse_action2"
 #define COMMAND_CONFIG_MOUSE_DROP_ACTION     "mouse_drop_action"
+#define COMMAND_CONFIG_MOUSE_EDGE_RESIZE     "mouse_edge_resize"
 #define COMMAND_CONFIG_EXTERNAL_BAR          "external_bar"
 #define COMMAND_CONFIG_SKIP_SPACE_ANIMATION  "skip_window_focus_animation"
 
@@ -1743,6 +1744,17 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                 g_mouse_state.drop_action = MOUSE_MODE_SWAP;
             } else if (token_equals(value, ARGUMENT_CONFIG_MOUSE_ACTION_STACK)) {
                 g_mouse_state.drop_action = MOUSE_MODE_STACK;
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_MOUSE_EDGE_RESIZE)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_window_manager.mouse_edge_resize]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                g_window_manager.mouse_edge_resize = false;
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                g_window_manager.mouse_edge_resize = true;
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }

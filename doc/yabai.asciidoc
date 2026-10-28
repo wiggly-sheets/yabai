@@ -229,6 +229,9 @@ Global Settings
 *mouse_drop_action* ['swap|stack']::
     Action performed when a bsp-managed window is dropped in the center of some other bsp-managed window.
 
+*mouse_edge_resize* ['on|off']::
+    Enable or disable plain left-drag resize inside the 12px strip along a window edge when no 'mouse_modifier' is held. Defaults to 'on'.
+
 Space Settings
 ^^^^^^^^^^^^^^
 
