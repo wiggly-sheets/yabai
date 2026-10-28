@@ -356,7 +356,7 @@ static void window_node_split(struct view *view, struct window_node *node, struc
 
 static inline float view_column_width(struct view *view)
 {
-    float ratio = in_range_ii(view->column_width_ratio, 0.1f, 0.9f) ? view->column_width_ratio : 0.5f;
+    float ratio = in_range_ii(g_window_manager.scroll_column_width, 0.1f, 0.9f) ? g_window_manager.scroll_column_width : 0.5f;
     return view->root->area.w * ratio;
 }
 
@@ -1138,7 +1138,6 @@ struct view *view_create(uint64_t sid)
         if (!view_check_flag(view, VIEW_AUTO_BALANCE))   view->auto_balance   = g_space_manager.auto_balance;
         if (!view_check_flag(view, VIEW_SPLIT_TYPE))     view->split_type     = g_space_manager.split_type;
         if (!view_check_flag(view, VIEW_SPLIT_ALGO))     view->split_algorithm = g_space_manager.split_algorithm;
-        view->column_width_ratio = 0.5f;
         view->scroll_offset = 0;
         view_update(view);
     } else {

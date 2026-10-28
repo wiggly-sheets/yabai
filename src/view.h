@@ -236,7 +236,6 @@ struct view
     int window_gap;
     uint32_t auto_balance;
     float scroll_offset;
-    float column_width_ratio;
     enum split_algorithm split_algorithm;
     uint64_t flags;
 };

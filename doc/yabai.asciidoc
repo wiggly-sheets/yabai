@@ -217,6 +217,10 @@ Global Settings
 *split_ratio* ['<FLOAT_SEL>']::
     Specify the size distribution when a window is split.
 
+*scroll_column_width* ['<FLOAT_SEL>']::
+    Width of each column relative to the screen width, for spaces using the 'scroll' layout. +
+    Clamped to the range [0.1, 0.9]. Defaults to 0.5.
+
 *mouse_modifier* ['cmd|alt|shift|ctrl|fn']::
     Keyboard modifier used for moving and resizing windows.
 

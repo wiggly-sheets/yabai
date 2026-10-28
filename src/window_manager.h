@@ -100,6 +100,7 @@ struct window_manager
     float window_animation_duration;
     int window_animation_easing;
     struct rgba_color insert_feedback_color;
+    float scroll_column_width;
     struct scratchpad *scratchpad_window;
 };
 
