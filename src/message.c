@@ -48,6 +48,7 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_SPLIT_ALGO            "split_algorithm"
 #define COMMAND_CONFIG_AUTO_BALANCE          "auto_balance"
 #define COMMAND_CONFIG_SCROLL_COLUMN_WIDTH   "scroll_column_width"
+#define COMMAND_CONFIG_SCROLL_REVERSED       "scroll_reversed"
 #define COMMAND_CONFIG_MOUSE_MOD             "mouse_modifier"
 #define COMMAND_CONFIG_MOUSE_ACTION1         "mouse_action1"
 #define COMMAND_CONFIG_MOUSE_ACTION2         "mouse_action2"
@@ -1599,6 +1600,17 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                 g_window_manager.scroll_column_width = clampf_range(value.float_value, 0.1f, 0.9f);
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.token.length, value.token.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_SCROLL_REVERSED)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_window_manager.scroll_reversed]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                g_window_manager.scroll_reversed = false;
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                g_window_manager.scroll_reversed = true;
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }
         } else if (token_equals(command, COMMAND_CONFIG_SPLIT_TYPE)) {
             struct token value = get_token(&message);

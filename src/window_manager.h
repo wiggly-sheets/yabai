@@ -101,6 +101,7 @@ struct window_manager
     int window_animation_easing;
     struct rgba_color insert_feedback_color;
     float scroll_column_width;
+    bool scroll_reversed;
     struct scratchpad *scratchpad_window;
 };
 

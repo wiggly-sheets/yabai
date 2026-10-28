@@ -370,7 +370,8 @@ static void view_scroll_apply(struct view *view, float col_w, int gap, int count
     int i = 0;
     for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
         if (!window_node_is_occupied(node)) continue;
-        node->area.x = view->root->area.x - view->scroll_offset + i * (col_w + gap);
+        int index = g_window_manager.scroll_reversed ? count - 1 - i : i;
+        node->area.x = view->root->area.x - view->scroll_offset + index * (col_w + gap);
         node->area.y = view->root->area.y;
         node->area.w = col_w;
         node->area.h = view->root->area.h;
@@ -401,7 +402,7 @@ static void view_layout_scroll(struct view *view)
     if (focused < 0) focused = 0;
     if (view->scroll_offset < 0) view->scroll_offset = 0;
 
-    float fx = focused * (col_w + gap);
+    float fx = (g_window_manager.scroll_reversed ? count - 1 - focused : focused) * (col_w + gap);
     if (fx < view->scroll_offset) {
         view->scroll_offset = fx;
     } else if (fx + col_w > view->scroll_offset + view->root->area.w) {

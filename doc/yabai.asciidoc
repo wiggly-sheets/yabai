@@ -221,6 +221,9 @@ Global Settings
     Width of each column relative to the screen width, for spaces using the 'scroll' layout. +
     Clamped to the range [0.1, 0.9]. Defaults to 0.5.
 
+*scroll_reversed* ['on|off']::
+    Reverse the column order of the 'scroll' layout, so the first window is rightmost. Defaults to 'off'.
+
 *mouse_modifier* ['cmd|alt|shift|ctrl|fn']::
     Keyboard modifier used for moving and resizing windows.
 
