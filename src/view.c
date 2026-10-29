@@ -5,6 +5,25 @@ extern struct window_manager g_window_manager;
 
 #define INSERT_FEEDBACK_WIDTH 2
 #define INSERT_FEEDBACK_RADIUS 9
+
+static inline float window_corner_radius(void)
+{
+    /* macOS 26+: window corner radius is user-set via
+     * `defaults write -g NSConvolutionOverride1 -float <r>` (NSGlobalDomain).
+     * Fall back to INSERT_FEEDBACK_RADIUS on older macOS (key absent) or unset. */
+    CFTypeRef v = CFPreferencesCopyValue(CFSTR("NSConvolutionOverride1"),
+                                         kCFPreferencesAnyApplication,
+                                         kCFPreferencesCurrentUser,
+                                         kCFPreferencesAnyHost);
+    if (v) {
+        float r = 0;
+        CFNumberGetValue(v, kCFNumberFloatType, &r);
+        CFRelease(v);
+        return r > 0 ? r : INSERT_FEEDBACK_RADIUS;
+    }
+    return INSERT_FEEDBACK_RADIUS;
+}
+
 void insert_feedback_show(struct window_node *node)
 {
     CFTypeRef frame_region;
@@ -86,7 +105,8 @@ void insert_feedback_show(struct window_node *node)
     CGRect rect = (CGRect) {{ 0.5f*INSERT_FEEDBACK_WIDTH, 0.5f*INSERT_FEEDBACK_WIDTH }, { frame.size.width - INSERT_FEEDBACK_WIDTH, frame.size.height - INSERT_FEEDBACK_WIDTH }};
     CGRect fill = CGRectInset(rect, 0.5f*INSERT_FEEDBACK_WIDTH, 0.5f*INSERT_FEEDBACK_WIDTH);
     CGRect clip = { { rect.origin.x + clip_x, rect.origin.y + clip_y }, { rect.size.width + clip_w, rect.size.height + clip_h } };
-    CGPathRef path = CGPathCreateWithRoundedRect(rect, cgrect_clamp_x_radius(rect, INSERT_FEEDBACK_RADIUS), cgrect_clamp_y_radius(rect, INSERT_FEEDBACK_RADIUS), NULL);
+    float feedback_radius = window_corner_radius();
+    CGPathRef path = CGPathCreateWithRoundedRect(rect, cgrect_clamp_x_radius(rect, feedback_radius), cgrect_clamp_y_radius(rect, feedback_radius), NULL);
 
     SLSDisableUpdate(g_connection);
     SLSSetWindowShape(g_connection, node->feedback_window.id, 0.0f, 0.0f, frame_region);

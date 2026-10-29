@@ -1207,6 +1207,7 @@ static EVENT_HANDLER(MOUSE_DOWN)
     if (!window || window_check_flag(window, WINDOW_FULLSCREEN)) goto out;
 
     g_mouse_state.window = window;
+    g_mouse_state.window->frame = window_ax_frame(g_mouse_state.window);
     g_mouse_state.window_frame = g_mouse_state.window->frame;
     g_mouse_state.down_location = point;
     g_mouse_state.direction = 0;
@@ -1360,7 +1361,7 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
     } else if (g_mouse_state.current_action == MOUSE_MODE_RESIZE) {
         uint64_t event_time = read_os_timer();
         float dt = ((float) event_time - g_mouse_state.last_moved_time) * (1000.0f / (float)read_os_freq());
-        if (dt < 16.0f) goto out;
+        if (dt < 67.67f) goto out;
 
         int dx = point.x - g_mouse_state.down_location.x;
         int dy = point.y - g_mouse_state.down_location.y;
@@ -1379,17 +1380,28 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
             }
 
             if (direction != 0) {
-                /* live drag must not spawn animation machinery per drag event */
-                float animation_duration = g_window_manager.window_animation_duration;
-                g_window_manager.window_animation_duration = 0.0f;
-                enum window_op_error err = window_manager_resize_window_relative(&g_window_manager, g_mouse_state.window, direction, dx, dy, false);
-                g_window_manager.window_animation_duration = animation_duration;
-                if (err == WINDOW_OP_ERROR_SUCCESS) {
-                    g_mouse_state.live_resized = true;
+                if (g_window_manager.adaptive_resize) {
+                    /* live drag must not spawn animation machinery per drag event */
+                    float animation_duration = g_window_manager.window_animation_duration;
+                    g_window_manager.window_animation_duration = 0.0f;
+                    enum window_op_error err = window_manager_resize_window_relative(&g_window_manager, g_mouse_state.window, direction, dx, dy, false);
+                    g_window_manager.window_animation_duration = animation_duration;
+                    if (err == WINDOW_OP_ERROR_SUCCESS) {
+                        g_mouse_state.live_resized = true;
+                    } else {
+                        /* free resize leaves the tile grid, so mouse-up must adjust it */
+                        g_mouse_state.live_resized = false;
+                        g_mouse_state.window->frame = window_ax_frame(g_mouse_state.window);
+                        window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, direction, dx, dy, false);
+                        g_mouse_state.window_frame = window_ax_frame(g_mouse_state.window);
+                    }
                 } else {
-                    /* free resize leaves the tile grid, so mouse-up must adjust it */
+                    /* adaptive resize disabled: move only the dragged window during the
+                     * drag and let mouse-up reconcile the BSP grid against the final frame */
                     g_mouse_state.live_resized = false;
+                    g_mouse_state.window->frame = window_ax_frame(g_mouse_state.window);
                     window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, direction, dx, dy, false);
+                    g_mouse_state.window_frame = window_ax_frame(g_mouse_state.window);
                 }
             }
         } else {

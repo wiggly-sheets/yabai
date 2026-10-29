@@ -89,6 +89,7 @@ struct window_manager
     uint32_t last_window_id;
     bool enable_mff;
     bool mouse_edge_resize;
+    bool adaptive_resize;
     bool focus_loop;
     enum ffm_mode ffm_mode;
     enum purify_mode purify_mode;
