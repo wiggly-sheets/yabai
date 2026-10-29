@@ -236,14 +236,13 @@ Global Settings
 *mouse_action2* ['move|resize']::
     Action performed when pressing 'mouse_modifier' + 'button2'.
 
-*mouse_drop_action* ['swap|stack']::
-    Action performed when a bsp-managed window is dropped in the center of some other bsp-managed window.
+*mouse_drop_action* ['swap|stack']::     Action performed when a bsp-managed window is dropped in the center of some other bsp-managed window.
 
-*mouse_edge_resize* ['on|off']::
-    Enable or disable plain left-drag resize inside the 12px strip along a window edge when no 'mouse_modifier' is held. Defaults to 'on'.
+*mouse_edge_resize* ['on|off']::     Enable or disable plain left-drag resize inside the 12px strip along a window edge when no 'mouse_modifier' is held. Defaults to 'off'.
 
-*focus_loop* ['on|off']::
-    Enable or disable wrap-around focus movement in scroll and accordion layouts. Defaults to 'on'.
+*adaptive_resize* ['on|off']::     Enable or disable live BSP grid resize during mouse drag. When enabled, resizing a window in a bsp layout dynamically adjusts the split ratios of sibling windows in real time. When disabled (default), only the dragged window resizes during the drag; the bsp grid is reconciled against the final frame on mouse-up. Defaults to 'off'.
+
+*focus_loop* ['on|off']::     Enable or disable wrap-around focus movement in scroll and accordion layouts. Defaults to 'on'.
 
 Space Settings
 ^^^^^^^^^^^^^^

@@ -2,12 +2,12 @@
 .\"     Title: yabai
 .\"    Author: [see the "AUTHOR(S)" section]
 .\" Generator: Asciidoctor 2.0.26
-.\"      Date: 2026-05-08
+.\"      Date: 2026-10-29
 .\"    Manual: Yabai Manual
 .\"    Source: Yabai
 .\"  Language: English
 .\"
-.TH "YABAI" "1" "2026-05-08" "Yabai" "Yabai Manual"
+.TH "YABAI" "1" "2026-10-29" "Yabai" "Yabai Manual"
 .ie \n(.g .ds Aq \(aq
 .el       .ds Aq '
 .ss \n[.ss] 0
@@ -319,6 +319,23 @@ The purpose is to provide a visual preview of the new window frame.
 Specify the size distribution when a window is split.
 .RE
 .sp
+\fBscroll_column_width\fP [\fI<FLOAT_SEL>\fP]
+.RS 4
+Width of each column relative to the screen width, for spaces using the \fIscroll\fP layout.
+.br
+Clamped to the range [0.1, 0.9]. Defaults to 0.5.
+.RE
+.sp
+\fBscroll_reversed\fP [\fIon|off\fP]
+.RS 4
+Reverse the column order of the \fIscroll\fP layout, so the first window is rightmost. Defaults to \fIoff\fP.
+.RE
+.sp
+\fBaccordion_ribbon_width\fP \fI<INTEGER>\fP
+.RS 4
+Width in pixels of the collapsed windows (the ribbon) in spaces using the \fIaccordion\fP layout. Defaults to 24.
+.RE
+.sp
 \fBmouse_modifier\fP [\fIcmd|alt|shift|ctrl|fn\fP]
 .RS 4
 Keyboard modifier used for moving and resizing windows.
@@ -337,6 +354,21 @@ Action performed when pressing \fImouse_modifier\fP + \fIbutton2\fP.
 \fBmouse_drop_action\fP [\fIswap|stack\fP]
 .RS 4
 Action performed when a bsp\-managed window is dropped in the center of some other bsp\-managed window.
+.RE
+.sp
+\fBmouse_edge_resize\fP [\fIon|off\fP]
+.RS 4
+Enable or disable plain left\-drag resize inside the 12px strip along a window edge when no \fImouse_modifier\fP is held. Defaults to \fIoff\fP.
+.RE
+.sp
+\fBadaptive_resize\fP [\fIon|off\fP]
+.RS 4
+Enable or disable live BSP grid resize during mouse drag. When enabled, resizing a window in a bsp layout dynamically adjusts the split ratios of sibling windows in real time. When disabled (default), only the dragged window resizes during the drag; the bsp grid is reconciled against the final frame on mouse\-up. Defaults to \fIoff\fP.
+.RE
+.sp
+\fBfocus_loop\fP [\fIon|off\fP]
+.RS 4
+Enable or disable wrap\-around focus movement in scroll and accordion layouts. Defaults to \fIon\fP.
 .RE
 .SS "Space Settings"
 .sp
@@ -504,6 +536,15 @@ Flip the tree of the selected space along the given axis.
 Rotate the tree of the selected space.
 .RE
 .sp
+\fB\-\-scroll\fP \fI<COLUMNS>\fP
+.RS 4
+Scroll a space using the \fIscroll\fP layout by the given number of columns, without changing focus.
+.br
+Positive values scroll towards later columns, negative values towards earlier ones.
+.br
+The next focus change re\-centers the strip on the focused window and overrides the manual offset.
+.RE
+.sp
 \fB\-\-padding\fP \fIabs|rel:<top>:<bottom>:<left>:<right>\fP
 .RS 4
 Padding added at the sides of the selected space.
@@ -537,7 +578,7 @@ Save the current BSP tree layout, padding, and gaps of the selected space to a J
 .br
 If an argument is not provided, saves to \f(CR~/.config/yabai/layouts/space_<INDEX>.json\fP.
 .br
-If a relative name without slash is provided, saves to \f(CR~/.config/yabai/layouts/<NAME>.json\fP.
+If a relative name without slash is provided (e.g. \f(CRwork\fP), saves to \f(CR~/.config/yabai/layouts/<NAME>.json\fP.
 .RE
 .sp
 \fB\-\-load\-layout\fP [\fI<NAME_OR_PATH>\fP]
@@ -560,14 +601,14 @@ Save the complete workspace session across all displays and spaces (layouts, pad
 .br
 If an argument is not provided, saves to \f(CR~/.config/yabai/layouts/session.json\fP.
 .br
-If a relative name without slash is provided, saves to \f(CR~/.config/yabai/layouts/<NAME>.json\fP.
+If a relative name without slash is provided (e.g. \f(CRwork\fP), saves to \f(CR~/.config/yabai/layouts/<NAME>.json\fP.
 .RE
 .sp
 \fB\-\-load\-session\fP [\fI<NAME_OR_PATH>\fP]
 .RS 4
 Restore a full workspace session across all displays and spaces from a JSON file.
 .br
-Automatically migrates open application windows to their saved spaces, restores space layout types (\fIbsp\fP, \fIstack\fP, \fIfloat\fP), reconstructs BSP trees, and reapplies paddings and gaps.
+Automatically migrates open application windows to their saved spaces, restores space layout types (\f(CRbsp\fP, \f(CRstack\fP, \f(CRfloat\fP), reconstructs BSP trees, and reapplies paddings and gaps.
 .br
 If an argument is not provided, loads from \f(CR~/.config/yabai/layouts/session.json\fP.
 .RE
@@ -1012,7 +1053,9 @@ When focusing the window, put the mouse at its center. Overrides the global \fBm
 .sp
 \fBffm=\fI<BOOL_SEL>\fP\fP | \fBfocus_follows_mouse=\fI<BOOL_SEL>\fP\fP
 .RS 4
-Override the global \fBfocus_follows_mouse\fP setting for matching windows. Set to \fIoff\fP to prevent focus from jumping to or from the window when the mouse passes over it.
+Override the global \fBfocus_follows_mouse\fP setting for matching windows.
+.br
+Set to \fIoff\fP to prevent focus from jumping to or from the window when the mouse passes over it.
 .RE
 .sp
 \fBsub\-layer=\fI<LAYER>\fP\fP
