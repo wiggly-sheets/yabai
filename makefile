@@ -27,7 +27,7 @@ tsan: BUILD_FLAGS=-std=c11 -Wall -Wextra -g -O0 -fvisibility=hidden -fsanitize=t
 tsan: clean-build $(BINS)
 
 install: BUILD_FLAGS=-std=c11 -Wall -Wextra -DNDEBUG -O3 -fvisibility=hidden -mmacosx-version-min=11.0 -fno-objc-arc -arch x86_64 -arch arm64 -sectcreate __TEXT __info_plist $(INFO_PLIST)
-install: clean-build $(BINS)
+install: clean-build $(BINS) icon
 
 # Build (release) and install from source so it behaves exactly like a Homebrew install:
 # copies the binary into PATH, codesigns it with a STABLE cert (so Accessibility grants
@@ -41,7 +41,7 @@ install-local: clean-build $(BINS)
 uninstall-local:
 	PREFIX="$(PREFIX)" $(SCRIPT_PATH)/install-local.sh --uninstall
 
-$(OSAX_SRC): $(OSAX_PATH)/loader.m $(OSAX_PATH)/payload.m
+$(OSAX_SRC): $(OSAX_PATH)/loader.m $(OSAX_PATH)/payload.m $(OSAX_PATH)/arm64_payload.m $(OSAX_PATH)/x64_payload.m $(OSAX_PATH)/common.h
 	xcrun clang $(OSAX_PATH)/payload.m -shared -fPIC -O3 -mmacosx-version-min=11.0 -arch x86_64 -arch arm64e -o $(OSAX_PATH)/payload $(FRAMEWORK_PATH) -framework SkyLight -framework Foundation -framework Carbon
 	xcrun clang $(OSAX_PATH)/loader.m -O3 -mmacosx-version-min=11.0 -arch x86_64 -arch arm64e -o $(OSAX_PATH)/loader -framework Cocoa
 	xxd -i -a $(OSAX_PATH)/payload $(OSAX_PATH)/payload_bin.c
@@ -53,7 +53,7 @@ man:
 	command -v asciidoctor >/dev/null 2>&1 && asciidoctor -b manpage $(DOC_PATH)/yabai.asciidoc -o $(DOC_PATH)/yabai.1 || true
 
 icon:
-	python3 $(SCRIPT_PATH)/seticon.py $(ASSET_PATH)/icon/2x/icon-512px@2x.png $(BUILD_PATH)/yabai || true
+	./scripts/seticon.sh $(ASSET_PATH)/icon/2x/icon-512px@2x.png $(BUILD_PATH)/yabai || true
 
 publish:
 	sed -i '' "60s/^VERSION=.*/VERSION=\"$(shell $(BUILD_PATH)/yabai --version | cut -d "v" -f 2)\"/" $(SCRIPT_PATH)/install.sh
@@ -65,6 +65,7 @@ archive: man install sign icon
 	cp -r $(BUILD_PATH) $(ARCH_PATH)/
 	cp -r $(DOC_PATH) $(ARCH_PATH)/
 	cp -r $(SMP_PATH) $(ARCH_PATH)/
+	cp -r $(ASSET_PATH) $(ARCH_PATH)/
 	tar -cvzf $(BUILD_PATH)/$(shell $(BUILD_PATH)/yabai --version).tar.gz $(ARCH_PATH)
 	rm -rf $(ARCH_PATH)
 
@@ -74,6 +75,7 @@ SIGN_IDENTITY := -
 endif
 
 sign:
+	xattr -c $(BUILD_PATH)/yabai
 	codesign -fs "$(SIGN_IDENTITY)" --options runtime --timestamp $(BUILD_PATH)/yabai
 
 clean-build:

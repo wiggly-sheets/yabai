@@ -10,6 +10,8 @@ static OBSERVER_CALLBACK(application_notification_handler)
     } else if (CFEqual(notification, kAXFocusedWindowChangedNotification)) {
         __atomic_store_n(&__pending_window_focus, true, __ATOMIC_RELEASE);
         event_loop_post(&g_event_loop, WINDOW_FOCUSED, (void *)(intptr_t) ax_window_id(element), 0);
+    } else if (CFEqual(notification, ax_application_notification[AX_APPLICATION_WINDOW_FOCUSED_TAB_INDEX])) {
+        event_loop_post(&g_event_loop, TABBED_WINDOW_FOCUSED, (void *) CFRetain(element), (int) ax_window_id(element));
     } else if (CFEqual(notification, kAXWindowMovedNotification)) {
         event_loop_post(&g_event_loop, WINDOW_MOVED, (void *)(intptr_t) ax_window_id(element), 0);
     } else if (CFEqual(notification, kAXWindowResizedNotification)) {
@@ -17,9 +19,9 @@ static OBSERVER_CALLBACK(application_notification_handler)
     } else if (CFEqual(notification, kAXTitleChangedNotification)) {
         event_loop_post(&g_event_loop, WINDOW_TITLE_CHANGED, (void *)(intptr_t) ax_window_id(element), 0);
     } else if (CFEqual(notification, kAXMenuOpenedNotification)) {
-        event_loop_post(&g_event_loop, MENU_OPENED, (void *)(intptr_t) ax_window_id(element), 0);
+        event_loop_post(&g_event_loop, MENU_OPENED, (void *)(intptr_t)((struct application *) context)->pid, 0);
     } else if (CFEqual(notification, kAXMenuClosedNotification)) {
-        event_loop_post(&g_event_loop, MENU_CLOSED, NULL, 0);
+        event_loop_post(&g_event_loop, MENU_CLOSED, (void *)(intptr_t)((struct application *) context)->pid, 0);
     } else if (CFEqual(notification, kAXWindowMiniaturizedNotification)) {
         event_loop_post(&g_event_loop, WINDOW_MINIMIZED, context, 0);
     } else if (CFEqual(notification, kAXWindowDeminiaturizedNotification)) {

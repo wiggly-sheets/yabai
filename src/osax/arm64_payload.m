@@ -26,6 +26,7 @@ uint64_t get_dock_spaces_offset(NSOperatingSystemVersion os_version) {
 
 uint64_t get_dppm_offset(NSOperatingSystemVersion os_version) {
     if (os_version.majorVersion == 27) {
+        if (os_version.minorVersion >= 2) return 0;
         return 0x40000;
     } else if (os_version.majorVersion == 26) {
         return 0x70000;
@@ -101,6 +102,7 @@ uint64_t get_remove_space_offset(NSOperatingSystemVersion os_version) {
 
 uint64_t get_move_space_offset(NSOperatingSystemVersion os_version) {
     if (os_version.majorVersion == 27) {
+        if (os_version.minorVersion >= 2) return 0;
         return 0x170000;
     } else if (os_version.majorVersion == 26) {
         return 0x1c0000;
@@ -118,7 +120,10 @@ uint64_t get_move_space_offset(NSOperatingSystemVersion os_version) {
 }
 
 uint64_t get_set_front_window_offset(NSOperatingSystemVersion os_version) {
-    if (os_version.majorVersion == 26 || os_version.majorVersion == 27) {
+    if (os_version.majorVersion == 27) {
+        if (os_version.minorVersion >= 2) return 0;
+        return 0x10000;
+    } else if (os_version.majorVersion == 26) {
         return 0x10000;
     } else if (os_version.majorVersion == 15) {
         return 0x35000;
@@ -155,6 +160,10 @@ const char *get_dock_spaces_pattern(NSOperatingSystemVersion os_version) {
 
 const char *get_dppm_pattern(NSOperatingSystemVersion os_version) {
     if (os_version.majorVersion == 27) {
+        if (os_version.minorVersion >= 2) {
+            // NOTE: DPDesktopPictureManager no longer exists as of macOS 27.2.
+            return NULL;
+        }
         return "?? ?? 00 ?? 08 ?? ?? 91 00 01 40 F9 ?? 03 ?? AA ?? 03 ?? AA ?? ?? ?? 94";
     } else if (os_version.majorVersion == 26) {
         return "?? ?? 00 ?? 08 ?? ?? 91 00 01 40 F9 E2 03 16 AA E3 03 19 AA ?? ?? ?? 94";

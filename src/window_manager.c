@@ -198,6 +198,7 @@ void window_manager_apply_manage_rules_to_window(struct space_manager *sm, struc
     }
 
     if (match) window_manager_apply_manage_rule_effects_to_window(sm, wm, window, &effects);
+    if (effects.scratchpad) free(effects.scratchpad);
 }
 
 void window_manager_apply_rules_to_window(struct space_manager *sm, struct window_manager *wm, struct window *window, char *window_title, char *window_role, char *window_subrole, bool one_shot_rules)
@@ -222,10 +223,12 @@ void window_manager_apply_rules_to_window(struct space_manager *sm, struct windo
     }
 
     if (match) window_manager_apply_rule_effects_to_window(sm, wm, window, &effects);
+    if (effects.scratchpad) free(effects.scratchpad);
 }
 
 void window_manager_set_focus_follows_mouse(struct window_manager *wm, enum ffm_mode mode)
 {
+    event_loop_reset_open_menus();
     mouse_handler_end(&g_mouse_state);
 
     uint32_t mask = (mode == FFM_DISABLED) ? MOUSE_EVENT_MASK : MOUSE_EVENT_MASK_FFM;
@@ -301,6 +304,18 @@ void window_manager_remove_managed_window(struct window_manager *wm, uint32_t wi
 void window_manager_add_managed_window(struct window_manager *wm, struct window *window, struct view *view)
 {
     if (view->layout == VIEW_FLOAT) return;
+
+    //
+    // NOTE: a window that did not get a node, because the stack it was meant for
+    // is full, is not managed. It stays where it is at the normal layer, and gets
+    // picked up again once there is room for it.
+    //
+
+    if (!view_find_window_node(view, window->id)) {
+        window_manager_adjust_layer(window, LAYER_NORMAL);
+        return;
+    }
+
     table_add(&wm->managed_window, &window->id, view);
     window_manager_purify_window(wm, window);
 }
@@ -370,6 +385,7 @@ void window_manager_resize_window_relative_internal(struct window *window, CGRec
             window_manager_move_window(window, fx, fy);
             window_manager_resize_window(window, fw, fh);
         });
+        window->frame = (CGRect){{fx, fy}, {fw, fh}};
     }
 }
 
@@ -432,8 +448,22 @@ enum window_op_error window_manager_resize_window_relative(struct window_manager
             }
 
             if (flush_node) {
-                window_node_flush(flush_node);
+                if (animate) {
+                    window_node_flush(flush_node);
+                } else {
+                    window_node_flush_direct(flush_node);
+                }
                 view_clear_flag(view, VIEW_IS_DIRTY);
+            } else if (animate) {
+                view_flush(view);
+            } else {
+                view_flush_direct(view);
+            }
+        } else {
+            if (animate) {
+                view_flush(view);
+            } else {
+                view_flush_direct(view);
             }
         }
     } else {
@@ -484,7 +514,7 @@ static inline void window_manager_notify_jankyborders(struct window_animation *a
             uint32_t real_wid[512];
         } data = { event, 0 };
 
-        for (int i = 0; i < animation_count; ++i) {
+        for (int i = 0; i < animation_count && data.count < array_count(data.proxy_wid); ++i) {
             if (skip && __atomic_load_n(&animation_list[i].skip, __ATOMIC_RELAXED)) continue;
 
             data.proxy_wid[data.count] = animation_list[i].proxy.id;
@@ -767,6 +797,7 @@ void window_manager_animate_window(struct window_capture capture)
 
 void window_manager_set_window_frame(struct window *window, float x, float y, float width, float height)
 {
+    if (!window || !window->application) return;
     //
     // NOTE(asmvik): Attempting to check the window frame cache to prevent unnecessary movement and resize calls to the AX API
     // is not reliable because it is possible to perform operations that should be applied, at a higher rate than the AX API events
@@ -1315,7 +1346,7 @@ struct window *window_manager_find_second_cousin_for_managed_window(struct windo
     return window_manager_find_window(wm, uncle_node->right->window_order[0]);
 }
 
-static void window_manager_make_key_window(ProcessSerialNumber *window_psn, uint32_t window_id)
+void window_manager_make_key_window(ProcessSerialNumber *window_psn, uint32_t window_id)
 {
     //
     // :SynthesizedEvent
@@ -1325,18 +1356,52 @@ static void window_manager_make_key_window(ProcessSerialNumber *window_psn, uint
     // event-tap is placed at the point where session events have been
     // annotated to flow to an application.
     //
+    // NOTE: the buffer is local because leaving Mission Control also calls this from the main queue.
+    //
 
-    memset(g_event_bytes, 0, 0xf8);
-    g_event_bytes[0x04] = 0xf8;
-    g_event_bytes[0x3a] = 0x10;
-    memcpy(g_event_bytes + 0x3c, &window_id, sizeof(uint32_t));
-    memset(g_event_bytes + 0x20, 0xff, 0x10);
+    uint8_t event_bytes[0xf8] = {0};
+    event_bytes[0x04] = 0xf8;
+    event_bytes[0x3a] = 0x10;
+    memcpy(event_bytes + 0x3c, &window_id, sizeof(uint32_t));
+    memset(event_bytes + 0x20, 0xff, 0x10);
 
-    g_event_bytes[0x08] = 0x01;
-    SLPSPostEventRecordTo(window_psn, g_event_bytes);
+    event_bytes[0x08] = 0x01;
+    SLPSPostEventRecordTo(window_psn, event_bytes);
 
-    g_event_bytes[0x08] = 0x02;
-    SLPSPostEventRecordTo(window_psn, g_event_bytes);
+    event_bytes[0x08] = 0x02;
+    SLPSPostEventRecordTo(window_psn, event_bytes);
+}
+
+//
+// NOTE: A key event alone does not make the window that had the keyboard give it up, which leaves two windows
+// of one application drawn as active. They have to be deactivated first, like when focusing a window normally.
+//
+void window_manager_transfer_key_window(ProcessSerialNumber *window_psn, uint32_t window_id, uint32_t old_ids[2])
+{
+    uint8_t event_bytes[0xf8] = {0};
+    event_bytes[0x04] = 0xf8;
+    event_bytes[0x08] = 0x0d;
+
+    bool deactivated = false;
+    for (int i = 0; i < 2; ++i) {
+        if (!old_ids[i] || old_ids[i] == window_id) continue;
+        if (i == 1 && old_ids[1] == old_ids[0]) continue;
+
+        event_bytes[0x8a] = 0x02;
+        memcpy(event_bytes + 0x3c, &old_ids[i], sizeof(uint32_t));
+        SLPSPostEventRecordTo(window_psn, event_bytes);
+        deactivated = true;
+    }
+
+    if (deactivated) {
+        usleep(40000);
+
+        event_bytes[0x8a] = 0x01;
+        memcpy(event_bytes + 0x3c, &window_id, sizeof(uint32_t));
+        SLPSPostEventRecordTo(window_psn, event_bytes);
+    }
+
+    window_manager_make_key_window(window_psn, window_id);
 }
 
 void window_manager_focus_window_without_raise(ProcessSerialNumber *window_psn, uint32_t window_id)
@@ -1370,18 +1435,25 @@ void window_manager_focus_window_without_raise(ProcessSerialNumber *window_psn, 
     window_manager_make_key_window(window_psn, window_id);
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 void window_manager_focus_window_with_raise(ProcessSerialNumber *window_psn, uint32_t window_id, AXUIElementRef window_ref)
 {
     TIME_FUNCTION;
 
-#if 1
+    pid_t pid = 0;
+    GetProcessPID(window_psn, &pid);
+    if (pid > 0) {
+        NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (app) {
+            [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+        }
+    }
+
     _SLPSSetFrontProcessWithOptions(window_psn, window_id, kCPSUserGenerated);
-    window_manager_make_key_window(window_psn, window_id);
     AXUIElementPerformAction(window_ref, kAXRaiseAction);
-#else
-    scripting_addition_focus_window(window_id);
-#endif
 }
+#pragma clang diagnostic pop
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -1615,7 +1687,7 @@ struct window **window_manager_add_application_windows(struct space_manager *sm,
     for (int i = 0; i < rule_len; ++i) {
         if (rule_check_flag(&wm->rules[i], RULE_ONE_SHOT_REMOVE)) {
             rule_destroy(&wm->rules[i]);
-            if (buf_del(wm->rules, i)) {
+            if (buf_del_ordered(wm->rules, i)) {
                 --i;
                 --rule_len;
             }
@@ -1651,6 +1723,179 @@ static uint32_t *window_manager_existing_application_window_list(struct applicat
     }
 
     return space_list ? space_window_list_for_connection(space_list, space_count, application ? application->connection : 0, window_count, true) : NULL;
+}
+
+#define AX_REMOTE_TOKEN_SCAN_MAX 0x1000
+
+// NOTE: the tab bar belongs to whichever member is showing, so only a tracked window can name a group.
+// Answer yes when a window will not say -- a skip on no evidence silently costs an application its tabs.
+// An application that times out is the exception: each probe of the scan would block the event loop.
+static bool window_manager_application_has_tab_group(struct window_manager *wm, uint32_t *window_list, int window_count)
+{
+    bool answered = false;
+
+    for (int i = 0; i < window_count; ++i) {
+        struct window *window = window_manager_find_window(wm, window_list[i]);
+        if (!window || !window->ref) continue;
+
+        CFArrayRef children_ref = NULL;
+        AXError error = AXUIElementCopyAttributeValue(window->ref, kAXChildrenAttribute, (CFTypeRef *) &children_ref);
+        if (error == kAXErrorCannotComplete) return false;
+        if (error != kAXErrorSuccess || !children_ref) return true;
+
+        answered = true;
+        bool found = false;
+        for (int j = 0; j < CFArrayGetCount(children_ref) && !found; ++j) {
+            CFTypeRef role_ref = NULL;
+            if (AXUIElementCopyAttributeValue(CFArrayGetValueAtIndex(children_ref, j), kAXRoleAttribute, &role_ref) != kAXErrorSuccess) continue;
+            if (!role_ref) continue;
+
+            found = CFEqual(role_ref, CFSTR("AXTabGroup"));
+            CFRelease(role_ref);
+        }
+
+        CFRelease(children_ref);
+        if (found) return true;
+    }
+
+    return !answered;
+}
+
+// NOTE: a hidden native tab is ordered out and on no space, and the AX API hands out no element for
+// one -- hence the remote-token scan. Do not route this through space_window_list_for_connection: its
+// admission is free to reject this exact shape, which is the dead ordered-out window it must filter.
+void window_manager_add_existing_application_tabs(struct space_manager *sm, struct window_manager *wm, struct application *application)
+{
+    uint64_t set_tags = 0;
+    uint64_t clear_tags = 0;
+
+    CFArrayRef space_list_ref = CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
+    CFArrayRef window_list_ref = SLSCopyWindowsWithOptionsAndTags(g_connection, application->connection, space_list_ref, 0x7, &set_tags, &clear_tags);
+    CFRelease(space_list_ref);
+    if (!window_list_ref) return;
+
+    int count = CFArrayGetCount(window_list_ref);
+    if (!count) {
+        CFRelease(window_list_ref);
+        return;
+    }
+
+    CFTypeRef query = SLSWindowQueryWindows(g_connection, window_list_ref, count);
+    CFTypeRef iterator = SLSWindowQueryResultCopyWindows(query);
+
+    uint32_t unseen[64];
+    uint32_t tracked[64];
+    int unseen_count = 0;
+    int tracked_count = 0;
+
+    while (SLSWindowIteratorAdvance(iterator)) {
+        uint32_t wid = SLSWindowIteratorGetWindowID(iterator);
+
+        if (window_manager_find_window(wm, wid)) {
+            if (tracked_count < array_count(tracked)) tracked[tracked_count++] = wid;
+            continue;
+        }
+
+        if (unseen_count == array_count(unseen))            continue;
+        if (SLSWindowIteratorGetParentID(iterator) != 0)    continue;
+        if (SLSWindowIteratorGetLevel(iterator) != 0)       continue;
+
+        uint64_t attributes = SLSWindowIteratorGetAttributes(iterator);
+        if (attributes != 0x0 && attributes != 0x1)         continue;
+
+        uint64_t tags = SLSWindowIteratorGetTags(iterator);
+        if (!(tags & 0x300000000000000) || !(tags & 0x1))   continue;
+
+        uint8_t ordered_in = 0;
+        SLSWindowIsOrderedIn(g_connection, wid, &ordered_in);
+        if (ordered_in)                                     continue;
+
+        unseen[unseen_count++] = wid;
+    }
+
+    CFRelease(query);
+    CFRelease(iterator);
+    CFRelease(window_list_ref);
+
+    if (!unseen_count || !tracked_count) return;
+
+    if (!window_manager_application_has_tab_group(wm, tracked, tracked_count)) {
+        debug("%s: %s skipped %d candidates, no tab group\n", __FUNCTION__, application->name, unseen_count);
+        return;
+    }
+
+    CFMutableDataRef data_ref = CFDataCreateMutable(NULL, 0x14);
+    CFDataIncreaseLength(data_ref, 0x14);
+
+    uint8_t *data = CFDataGetMutableBytePtr(data_ref);
+    *(uint32_t *) (data + 0x0) = application->pid;
+    *(uint32_t *) (data + 0x8) = 0x636f636f;
+
+    int seeded = 0;
+    int remaining = unseen_count;
+
+    for (uint64_t element_id = 0; element_id < AX_REMOTE_TOKEN_SCAN_MAX && remaining > 0; ++element_id) {
+        memcpy(data + 0xc, &element_id, sizeof(uint64_t));
+        AXUIElementRef element_ref = _AXUIElementCreateWithRemoteToken(data_ref);
+        if (!element_ref) continue;
+
+        CFTypeRef role = NULL;
+        AXError error = AXUIElementCopyAttributeValue(element_ref, kAXRoleAttribute, &role);
+        bool consumed = false;
+
+        if (role) {
+            if (CFEqual(role, kAXWindowRole)) {
+                uint32_t element_wid = ax_window_id(element_ref);
+
+                for (int i = 0; element_wid && i < unseen_count; ++i) {
+                    if (unseen[i] != element_wid) continue;
+                    unseen[i] = 0;
+                    --remaining;
+
+                    // NOTE: an application can also keep other windows ordered out, like the quick terminal
+                    // of Ghostty, which is a dialog. Tracking one makes it look like the application has a
+                    // window on every space, so it would never pull the user to the space of its real windows.
+                    CFTypeRef subrole = NULL;
+                    AXUIElementCopyAttributeValue(element_ref, kAXSubroleAttribute, &subrole);
+                    bool is_tab = subrole && CFEqual(subrole, kAXStandardWindowSubrole);
+                    if (subrole) CFRelease(subrole);
+                    if (!is_tab) break;
+
+                    // NOTE: the element belongs to the window from here on, even if none is returned.
+                    consumed = true;
+                    struct window *window = window_manager_create_and_add_window(sm, wm, application, element_ref, element_wid, false);
+                    if (window) {
+                        window_set_flag(window, WINDOW_TAB_MEMBER);
+                        ++seeded;
+                    }
+                    break;
+                }
+            }
+            CFRelease(role);
+        }
+
+        if (!consumed) CFRelease(element_ref);
+        if (error == kAXErrorCannotComplete) break;
+    }
+
+    CFRelease(data_ref);
+    debug("%s: %s seeded %d of %d unseen\n", __FUNCTION__, application->name, seeded, unseen_count);
+}
+
+void window_manager_release_tab_members(struct window_manager *wm)
+{
+    table_for (struct window *window, wm->window, {
+        window_clear_flag(window, WINDOW_TAB_MEMBER);
+    })
+}
+
+void window_manager_add_existing_tabs(struct space_manager *sm, struct window_manager *wm)
+{
+    table_for (struct application *application, wm->application, {
+        window_manager_add_existing_application_tabs(sm, wm, application);
+    })
+
+    update_window_notifications();
 }
 
 bool window_manager_add_existing_application_windows(struct space_manager *sm, struct window_manager *wm, struct application *application, int refresh_index)
@@ -1727,7 +1972,9 @@ bool window_manager_add_existing_application_windows(struct space_manager *sm, s
 
                     memcpy(data+0xc, &element_id, sizeof(uint64_t));
                     AXUIElementRef element_ref = _AXUIElementCreateWithRemoteToken(data_ref);
+                    if (!element_ref) continue;
 
+                    bool consumed = false;
                     const void *role = NULL;
                     AXUIElementCopyAttributeValue(element_ref, kAXRoleAttribute, &role);
 
@@ -1748,13 +1995,14 @@ bool window_manager_add_existing_application_windows(struct space_manager *sm, s
 
                             if (matched) {
                                 window_manager_create_and_add_window(sm, wm, application, element_ref, element_wid, false);
-                            } else {
-                                CFRelease(element_ref);
+                                consumed = true;
                             }
                         }
 
                         CFRelease(role);
                     }
+
+                    if (!consumed) CFRelease(element_ref);
                 }
 
                 CFRelease(data_ref);
@@ -1858,6 +2106,16 @@ enum window_op_error window_manager_stack_window(struct space_manager *sm, struc
     struct view *a_view = window_manager_find_managed_window(wm, a);
     if (!a_view) return WINDOW_OP_ERROR_INVALID_SRC_NODE;
 
+    //
+    // NOTE: check for room before b is taken out of its node, so that a full stack
+    // leaves b where it is. b does not take a slot of its own if it is already in
+    // the stack. Untiling b can free and merge nodes, so look up a_node again after.
+    //
+
+    struct window_node *a_node = view_find_window_node(a_view, a->id);
+    int stack_count = a_node->window_count - window_node_contains_window(a_node, b->id);
+    if (stack_count >= NODE_MAX_WINDOW_COUNT) return WINDOW_OP_ERROR_MAX_STACK;
+
     struct view *b_view = window_manager_find_managed_window(wm, b);
     if (b_view) {
         space_manager_untile_window(b_view, b);
@@ -1869,8 +2127,7 @@ enum window_op_error window_manager_stack_window(struct space_manager *sm, struc
         if (window_check_flag(b, WINDOW_STICKY)) window_manager_make_window_sticky(sm, wm, b, false);
     }
 
-    struct window_node *a_node = view_find_window_node(a_view, a->id);
-    if (a_node->window_count+1 >= NODE_MAX_WINDOW_COUNT) return WINDOW_OP_ERROR_MAX_STACK;
+    a_node = view_find_window_node(a_view, a->id);
 
     view_stack_window_node(a_node, b);
     window_manager_add_managed_window(wm, b, a_view);
@@ -1917,7 +2174,7 @@ enum window_op_error window_manager_warp_window(struct space_manager *sm, struct
             struct window_node *a_node_add = view_add_window_node_with_insertion_point(b_view, a, b->id);
 
             struct window_capture *window_list = NULL;
-            window_node_capture_windows(a_node_add, &window_list);
+            if (a_node_add) window_node_capture_windows(a_node_add, &window_list);
             window_manager_animate_window_list(window_list, ts_buf_len(window_list));
         } else {
             if (window_node_contains_window(a_node, a_view->insertion_point)) {
@@ -1966,7 +2223,7 @@ enum window_op_error window_manager_warp_window(struct space_manager *sm, struct
                 window_node_capture_windows(a_node_rm, &window_list);
             }
 
-            if (a_node_rm != a_node_add && a_node_rm != a_node_add->parent) {
+            if (a_node_add && a_node_rm != a_node_add && a_node_rm != a_node_add->parent) {
                 window_node_capture_windows(a_node_add, &window_list);
             }
 
@@ -2044,6 +2301,7 @@ enum window_op_error window_manager_swap_window(struct space_manager *sm, struct
 
         a_node->window_list[b_list_index] = a->id;
         a_node->window_order[b_order_index] = a->id;
+        insert_feedback_rekey(a_node);
 
         if (a->id == wm->focused_window_id) {
             window_manager_focus_window_with_raise(&b->application->psn, b->id, b->ref);
@@ -2361,7 +2619,8 @@ void window_manager_wait_for_native_fullscreen_transition(struct window *window)
         workspace_is_macos_sequoia() ||
         (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
         int timeout = 30;
-        while (!space_is_user(space_manager_active_space()) && --timeout > 0) {
+        while ((!space_is_user(space_manager_active_space()) ||
+                !space_is_user(window_space(window->id))) && --timeout > 0) {
 
             //
             // NOTE(asmvik): Window has exited native-fullscreen mode.
@@ -2402,7 +2661,9 @@ void window_manager_toggle_window_native_fullscreen(struct window *window)
     //
 
     window_manager_focus_window_with_raise(&window->application->psn, window->id, window->ref);
-    while (sid != space_manager_active_space()) { usleep(100000); }
+
+    int timeout = 30;
+    while (sid != space_manager_active_space() && --timeout > 0) { usleep(100000); }
 
 
     if (!window_is_fullscreen(window)) {
@@ -2658,6 +2919,11 @@ static void window_manager_validate_windows_on_space(struct window_manager *wm, 
             struct window *window = window_manager_find_window(wm, view_window_list[i]);
             if (!window) continue;
 
+            uint64_t w_sid = window_space(window->id);
+            if (space_is_fullscreen(w_sid) || w_sid == view->sid) {
+                continue;
+            }
+
             //
             // @cleanup
             //
@@ -2693,6 +2959,10 @@ static void window_manager_check_for_windows_on_space(struct window_manager *wm,
         if (space_is_user(view->sid)) {
             if (window_check_flag(window, WINDOW_FULLSCREEN) && !window_is_fullscreen(window)) {
                 window_clear_flag(window, WINDOW_FULLSCREEN);
+                int attempts = 0;
+                while (!window_ax_can_move(window) && attempts++ < 15) {
+                    usleep(20000);
+                }
             }
             if (!window_can_move(window) && window_ax_can_move(window)) {
                 window_set_flag(window, WINDOW_MOVABLE);
@@ -2704,8 +2974,18 @@ static void window_manager_check_for_windows_on_space(struct window_manager *wm,
 
         if (!window_manager_should_manage_window(window)) continue;
 
+        // NOTE: a tab member reaching a space is a group switching tabs, not a window to tile.
+        if (window_check_flag(window, WINDOW_TAB_MEMBER)) continue;
+
         struct view *existing_view = window_manager_find_managed_window(wm, window);
         if (existing_view && existing_view->layout != VIEW_FLOAT && existing_view != view) {
+
+            //
+            // NOTE: A window dragged onto another display appears in its window list before the
+            // mouse is released. Leave it for MOUSE_UP to drop, rather than re-tiling under the cursor.
+            //
+
+            if (window == g_mouse_state.window) continue;
 
             //
             // @cleanup
@@ -2721,7 +3001,18 @@ static void window_manager_check_for_windows_on_space(struct window_manager *wm,
             window_manager_adjust_layer(window, LAYER_NORMAL);
             window_manager_remove_managed_window(wm, window->id);
             window_manager_purify_window(wm, window);
-            view_set_flag(existing_view, VIEW_IS_DIRTY);
+
+            //
+            // NOTE: Only the view being checked is flushed by our caller; flush the view the window
+            // left if it is visible on another display, otherwise it keeps a gap.
+            //
+
+            if (space_is_visible(existing_view->sid)) {
+                window_node_flush(existing_view->root);
+                view_clear_flag(existing_view, VIEW_IS_DIRTY);
+            } else {
+                view_set_flag(existing_view, VIEW_IS_DIRTY);
+            }
         }
 
         if (!existing_view || (existing_view->layout != VIEW_FLOAT && existing_view != view)) {
@@ -2845,6 +3136,7 @@ void window_manager_init(struct window_manager *wm)
     wm->active_window_opacity = 1.0f;
     wm->normal_window_opacity = 1.0f;
     wm->window_opacity_duration = 0.0f;
+    wm->window_native_tabs = false;
     wm->window_animation_duration = 0.0f;
     wm->window_animation_easing = ease_out_circ_type;
     wm->insert_feedback_color = rgba_color_from_hex(0xffd75f5f);

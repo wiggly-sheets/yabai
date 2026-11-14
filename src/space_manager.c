@@ -458,7 +458,10 @@ struct view *space_manager_tile_window_on_space_with_insertion_point(struct spac
 
     window_manager_adjust_layer(window, LAYER_BELOW);
     struct window_node *node = view_add_window_node_with_insertion_point(view, window, insertion_point);
-    assert(node);
+    if (!node) {
+        window_manager_adjust_layer(window, LAYER_NORMAL);
+        return view;
+    }
 
     if (space_is_visible(view->sid)) {
         if (view->layout == VIEW_SCROLL || view->layout == VIEW_ACCORDION) {
@@ -518,7 +521,8 @@ int space_manager_mission_control_index(uint64_t sid)
 
         for (int j = 0; j < spaces_count; ++j) {
             CFDictionaryRef space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
-            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
+            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("ManagedSpaceID"));
+            if (!sid_ref) sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
             CFNumberGetValue(sid_ref, CFNumberGetType(sid_ref), &result);
             if (sid == result) goto out;
 
@@ -548,7 +552,8 @@ uint64_t space_manager_mission_control_space(int desktop_id)
 
         for (int j = 0; j < spaces_count; ++j) {
             CFDictionaryRef space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
-            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
+            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("ManagedSpaceID"));
+            if (!sid_ref) sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
             CFNumberGetValue(sid_ref, CFNumberGetType(sid_ref), &result);
             if (desktop_cnt == desktop_id) goto out;
 
@@ -568,10 +573,27 @@ uint64_t space_manager_cursor_space(void)
     return display_space_id(did);
 }
 
+//
+// NOTE: read the id of a space the way mission control lookups do, preferring
+// ManagedSpaceID and falling back to id64, and give 0 when neither is there.
+//
+
+static uint64_t space_manager_space_ref_id(CFDictionaryRef space_ref)
+{
+    uint64_t result = 0;
+
+    CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("ManagedSpaceID"));
+    if (!sid_ref) sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
+    if (sid_ref) CFNumberGetValue(sid_ref, kCFNumberSInt64Type, &result);
+
+    return result;
+}
+
 uint64_t space_manager_prev_space(uint64_t sid)
 {
     uint64_t p_sid = 0;
     uint64_t n_sid = 0;
+    bool found_sid = false;
 
     CFArrayRef display_spaces_ref = SLSCopyManagedDisplaySpaces(g_connection);
     if (!display_spaces_ref) return 0;
@@ -584,9 +606,11 @@ uint64_t space_manager_prev_space(uint64_t sid)
 
         for (int j = 0; j < spaces_count; ++j) {
             CFDictionaryRef space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
-            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
-            CFNumberGetValue(sid_ref, CFNumberGetType(sid_ref), &n_sid);
-            if (n_sid == sid) goto out;
+            n_sid = space_manager_space_ref_id(space_ref);
+            if (n_sid == sid) {
+                found_sid = true;
+                goto out;
+            }
 
             p_sid = n_sid;
         }
@@ -594,7 +618,7 @@ uint64_t space_manager_prev_space(uint64_t sid)
 
 out:
     CFRelease(display_spaces_ref);
-    return p_sid != sid ? p_sid : 0;
+    return found_sid && p_sid != sid ? p_sid : 0;
 }
 
 uint64_t space_manager_next_space(uint64_t sid)
@@ -613,13 +637,14 @@ uint64_t space_manager_next_space(uint64_t sid)
 
         for (int j = 0; j < spaces_count; ++j) {
             CFDictionaryRef space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
-            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
-            CFNumberGetValue(sid_ref, CFNumberGetType(sid_ref), &n_sid);
+            n_sid = space_manager_space_ref_id(space_ref);
             if (found_sid) goto out;
 
             found_sid = n_sid == sid;
         }
     }
+
+    n_sid = 0;
 
 out:
     CFRelease(display_spaces_ref);
@@ -666,9 +691,15 @@ uint64_t space_manager_last_space(void)
 
 uint64_t space_manager_active_space(void)
 {
-    uint32_t did = 0;
     struct window *window = window_manager_focused_window(&g_window_manager);
+    if (window && !window_check_flag(window, WINDOW_STICKY) && !window_is_sticky(window->id)) {
+        uint64_t w_sid = window_space(window->id);
+        if (w_sid && space_is_user(w_sid) && space_is_visible(w_sid)) {
+            return w_sid;
+        }
+    }
 
+    uint32_t did = 0;
     if (window) did = window_display_id(window->id);
     if (!did)   did = display_manager_active_display_id();
     if (!did)   return 0;
@@ -771,8 +802,8 @@ static enum space_op_error space_manager_swap_space_with_space_on_display(uint32
     int b_window_list_count = 0;
     uint32_t *b_window_list = space_window_list(b_sid, &b_window_list_count, true);
 
-    struct view *a_view = table_find(&g_space_manager.view, &a_sid);
-    struct view *b_view = table_find(&g_space_manager.view, &b_sid);
+    struct view *a_view = space_manager_find_view(&g_space_manager, a_sid);
+    struct view *b_view = space_manager_find_view(&g_space_manager, b_sid);
 
     table_remove(&g_space_manager.view, &a_sid);
     table_remove(&g_space_manager.view, &b_sid);
@@ -871,6 +902,7 @@ enum space_op_error space_manager_move_space_to_space(uint64_t acting_sid, uint6
     uint32_t selector_did = space_display_id(selector_sid);
 
     if (acting_sid == selector_sid) return SPACE_OP_ERROR_SAME_SPACE;
+    if (!selector_sid) return SPACE_OP_ERROR_MISSING_DST;
     if (acting_did != selector_did) return SPACE_OP_ERROR_SAME_DISPLAY;
 
     bool is_animating = display_manager_display_is_animating(acting_did);
@@ -940,6 +972,44 @@ enum space_op_error space_manager_move_space_to_display(struct space_manager *sm
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 bool space_manager_focus_space_using_gesture(uint32_t new_did, uint64_t new_sid)
 {
+    static uint64_t last_gesture_sid = 0;
+    static uint64_t prev_gesture_sid = 0;
+    static uint64_t last_gesture_time = 0;
+    static int ping_pong_count = 0;
+
+    uint64_t now = read_os_timer();
+    uint64_t dt_ms = (now > last_gesture_time) ? (now - last_gesture_time) / 1000000ULL : 0;
+
+    // Guard 1: Duplicate gesture to the same space within 350ms
+    if (last_gesture_sid == new_sid && dt_ms < 350) {
+        last_gesture_time = now;
+        debug("%s: skipping duplicate gesture to space %lld (dt=%llums)\n", __FUNCTION__, new_sid, dt_ms);
+        return true;
+    }
+
+    // Guard 2: Minimum physical gesture spacing (150ms) to prevent Dock queue storms
+    if (dt_ms < 150) {
+        debug("%s: rate-limiting gesture to space %lld (dt=%llums < 150ms)\n", __FUNCTION__, new_sid, dt_ms);
+        return false;
+    }
+
+    // Guard 3: Ping-pong oscillation breaker
+    if (new_sid == prev_gesture_sid && dt_ms < 400) {
+        ping_pong_count++;
+        if (ping_pong_count >= 2) {
+            debug("%s: ping-pong oscillation detected between spaces %lld and %lld! Blocking loop.\n",
+                  __FUNCTION__, last_gesture_sid, new_sid);
+            return false;
+        }
+    } else if (dt_ms >= 500) {
+        ping_pong_count = 0;
+    }
+
+    prev_gesture_sid = last_gesture_sid;
+    last_gesture_sid = new_sid;
+    last_gesture_time = now;
+    __atomic_store_n(&__last_space_change_time, now, __ATOMIC_RELEASE);
+
     int cur_index = space_manager_mission_control_index(display_space_id(new_did));
     int new_index = space_manager_mission_control_index(new_sid);
 
@@ -966,23 +1036,68 @@ bool space_manager_focus_space_using_gesture(uint32_t new_did, uint64_t new_sid)
     // Technique first observed in practice, and reverse-engineered from, BetterTouchTool.
     //
 
-    CGEventRef event_dock_control = CGEventCreate(NULL);
-    if (!event_dock_control) return false;
-
-    float sign = (new_index - cur_index) > 0 ? 1.0 : -1.0;
-    CGEventSetIntegerValueField(event_dock_control, /* kCGSEventTypeField            */  55, /* kCGSEventDockControl       */ 30);
-    CGEventSetIntegerValueField(event_dock_control, /* kCGEventGestureHIDType        */ 110, /* kIOHIDEventTypeDockSwipe   */ 23);
-    CGEventSetIntegerValueField(event_dock_control, /* kCGEventGestureSwipeMotion    */ 123, /* kCGGestureMotionHorizontal */  1);
-    CGEventSetDoubleValueField(event_dock_control,  /* kCGEventGestureSwipeProgress  */ 124, sign);
-    CGEventSetDoubleValueField(event_dock_control,  /* kCGEventGestureSwipeVelocityX */ 129, sign * 9999.0);
-
-    for (int i = 0; i < count; ++i) {
-        CGEventSetIntegerValueField(event_dock_control, /* kCGEventGesturePhase */ 132, /* kCGSGesturePhaseBegan */ 1);
-        CGEventPost(kCGSessionEventTap, event_dock_control);
-        CGEventSetIntegerValueField(event_dock_control, /* kCGEventGesturePhase */ 132, /* kCGSGesturePhaseEnded */ 4);
-        CGEventPost(kCGSessionEventTap, event_dock_control);
+    bool is_right = (new_index - cur_index) > 0;
+    if (!space_manager_is_natural_scrolling_active(&g_space_manager)) {
+        is_right = !is_right;
     }
-    CFRelease(event_dock_control);
+
+    if (iss_requires_event_augmentation()) {
+        const double progress = is_right ? -0.000016 : 0.000016;
+        const double modern_vel = is_right ? -9999.0 : 9999.0;
+        const int phases[3] = { /* Began */ 1, /* Changed */ 2, /* Ended */ 4 };
+
+        //
+        // NOTE: Post the steps back to back. A pause between them lets the Dock drop
+        // a step of a multi-space jump (e.g. 4 -> 1 ending up on space 2).
+        //
+
+        for (int i = 0; i < count; ++i) {
+            for (int p = 0; p < 3; ++p) {
+                int phase = phases[p];
+                CGEventRef ev = CGEventCreate(NULL);
+                if (!ev) continue;
+
+                CGEventSetIntegerValueField(ev, /* kCGSEventTypeField            */  55, /* kCGSEventDockControl       */ 30);
+                CGEventSetIntegerValueField(ev, /* kCGEventGestureHIDType        */ 110, /* kIOHIDEventTypeDockSwipe   */ 23);
+                CGEventSetIntegerValueField(ev, /* kCGEventGesturePhase          */ 132, phase);
+                CGEventSetDoubleValueField(ev,  /* kCGEventGestureSwipeProgress  */ 124, progress);
+                CGEventSetIntegerValueField(ev, /* kCGEventGestureSwipeMotion    */ 123, /* kCGGestureMotionHorizontal */  1);
+                CGEventSetIntegerValueField(ev, /* kCGEventGesturePhaseAlias     */ 134, phase);
+                CGEventSetDoubleValueField(ev,  /* kCGEventGestureZoomDeltaY     */ 138, 3.0);
+                CGEventSetDoubleValueField(ev,  /* kCGEventSourceUnixPIDAlias    */ 169, (double)mach_absolute_time());
+                CGEventSetDoubleValueField(ev,  /* kCGEventGestureSwipePositionX */ 125, 0.1);
+
+                if (phase == 4) {
+                    CGEventSetDoubleValueField(ev, /* kCGEventGestureSwipeVelocityX */ 129, modern_vel);
+                }
+
+                CGEventRef augmented = iss_augment_dock_swipe_event(ev);
+                CFRelease(ev);
+                if (!augmented) continue;
+
+                CGEventPost(kCGSessionEventTap, augmented);
+                CFRelease(augmented);
+            }
+        }
+    } else {
+        CGEventRef event_dock_control = CGEventCreate(NULL);
+        if (!event_dock_control) return false;
+
+        float sign = is_right ? 1.0 : -1.0;
+        CGEventSetIntegerValueField(event_dock_control, /* kCGSEventTypeField            */  55, /* kCGSEventDockControl       */ 30);
+        CGEventSetIntegerValueField(event_dock_control, /* kCGEventGestureHIDType        */ 110, /* kIOHIDEventTypeDockSwipe   */ 23);
+        CGEventSetIntegerValueField(event_dock_control, /* kCGEventGestureSwipeMotion    */ 123, /* kCGGestureMotionHorizontal */  1);
+        CGEventSetDoubleValueField(event_dock_control,  /* kCGEventGestureSwipeProgress  */ 124, sign);
+        CGEventSetDoubleValueField(event_dock_control,  /* kCGEventGestureSwipeVelocityX */ 129, sign * 9999.0);
+
+        for (int i = 0; i < count; ++i) {
+            CGEventSetIntegerValueField(event_dock_control, /* kCGEventGesturePhase */ 132, /* kCGSGesturePhaseBegan */ 1);
+            CGEventPost(kCGSessionEventTap, event_dock_control);
+            CGEventSetIntegerValueField(event_dock_control, /* kCGEventGesturePhase */ 132, /* kCGSGesturePhaseEnded */ 4);
+            CGEventPost(kCGSessionEventTap, event_dock_control);
+        }
+        CFRelease(event_dock_control);
+    }
 
     if (focus_display) {
         display_manager_set_active_display_id(new_did);
@@ -1006,13 +1121,20 @@ enum space_op_error space_manager_focus_space(uint64_t sid)
 
     uint32_t cur_did = space_display_id(cur_sid);
     uint32_t new_did = space_display_id(sid);
-    bool focus_display = cur_did != new_did;
+
+    if (cur_did == new_did && display_space_id(new_did) == sid) return SPACE_OP_ERROR_SAME_SPACE;
 
     bool is_animating = display_manager_display_is_animating(new_did);
     if (is_animating) return SPACE_OP_ERROR_DISPLAY_IS_ANIMATING;
 
-    if (scripting_addition_focus_space(sid)) {
-        if (focus_display) {
+    __atomic_store_n(&__last_space_change_time, read_os_timer(), __ATOMIC_RELEASE);
+    if (!window_manager_find_window_on_space_by_rank_filtering_window(&g_window_manager, sid, 1, 0)) {
+        __atomic_store_n(&__last_empty_space_focus_time, read_os_timer(), __ATOMIC_RELEASE);
+    }
+
+    bool disable_sa = getenv("YABAI_DISABLE_SA") != NULL || getenv("YABAI_SIMULATE_SIP_ON") != NULL;
+    if (!disable_sa && scripting_addition_focus_space(sid)) {
+        if (cur_did != new_did) {
             display_manager_focus_display(new_did, sid);
         }
     } else {
@@ -1033,6 +1155,8 @@ enum space_op_error space_manager_switch_space(uint64_t sid)
     uint32_t cur_did = space_display_id(cur_sid);
     uint32_t did     = space_display_id(sid);
 
+    if (cur_did == did && display_space_id(did) == sid) return SPACE_OP_ERROR_SAME_SPACE;
+
     bool is_src_animating = display_manager_display_is_animating(cur_did);
     if (is_src_animating) return SPACE_OP_ERROR_DISPLAY_IS_ANIMATING;
 
@@ -1045,7 +1169,18 @@ enum space_op_error space_manager_switch_space(uint64_t sid)
         return SPACE_OP_ERROR_SUCCESS;
     }
 
-    return scripting_addition_focus_space(sid) ? SPACE_OP_ERROR_SUCCESS : SPACE_OP_ERROR_SCRIPTING_ADDITION;
+    __atomic_store_n(&__last_space_change_time, read_os_timer(), __ATOMIC_RELEASE);
+    if (!window_manager_find_window_on_space_by_rank_filtering_window(&g_window_manager, sid, 1, 0)) {
+        __atomic_store_n(&__last_empty_space_focus_time, read_os_timer(), __ATOMIC_RELEASE);
+    }
+
+    bool disable_sa = getenv("YABAI_DISABLE_SA") != NULL || getenv("YABAI_SIMULATE_SIP_ON") != NULL;
+    if (!disable_sa && scripting_addition_focus_space(sid)) {
+        return SPACE_OP_ERROR_SUCCESS;
+    }
+
+    space_manager_focus_space_using_gesture(did, sid);
+    return SPACE_OP_ERROR_SUCCESS;
 }
 
 enum space_op_error space_manager_destroy_space(uint64_t sid)
@@ -1161,6 +1296,31 @@ bool space_manager_refresh_application_windows(struct space_manager *sm)
     return window_count != g_window_manager.window.count;
 }
 
+//
+// NOTE: a view that is replaced by another view for the same space. Its windows
+// are no longer managed through it, and space validation tiles them again in the
+// view that takes its place. A window another view manages stays with that view.
+//
+
+static void space_manager_discard_view(struct view *view)
+{
+    int window_count = 0;
+    uint32_t *window_list = view_find_window_list(view, &window_count);
+
+    for (int i = 0; i < window_count; ++i) {
+        if (table_find(&g_window_manager.managed_window, &window_list[i]) == view) {
+            window_manager_remove_managed_window(&g_window_manager, window_list[i]);
+        }
+    }
+
+    for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
+        node->window_count = 0;
+    }
+
+    view_destroy(view);
+    free(view);
+}
+
 void space_manager_handle_display_add(struct space_manager *sm, uint32_t did)
 {
     int space_count;
@@ -1177,40 +1337,90 @@ void space_manager_handle_display_add(struct space_manager *sm, uint32_t did)
         ++list_count;
     })
 
+    //
+    // NOTE: the spaces of a display that comes back get new ids, and the views from
+    // before are found again by the uuid of their space. Before DISPLAY_ADDED is
+    // handled, anything that looked up a view for one of the new ids has already
+    // created a fresh, empty view there with the same uuid. Prefer the view from
+    // before, which holds the layout, and let it replace the fresh one.
+    //
+
+    struct view *moved_view[space_count];
+    uint64_t moved_sid[space_count];
+    struct space_label *moved_label[space_count];
+    int moved_count = 0;
+
     for (int i = 0; i < space_count; ++i) {
         uint64_t sid = space_list[i];
         CFStringRef uuid = SLSSpaceCopyName(g_connection, sid);
         if (!uuid) continue;
 
+        int match = -1;
         for (int j = 0; j < list_count; ++j) {
-            CFStringRef view_uuid = uuid_list[j];
-            if (!view_uuid) continue;
+            if (!uuid_list[j] || !CFEqual(uuid_list[j], uuid)) continue;
 
-            if (CFEqual(view_uuid, uuid)) {
-                struct view *view = view_list[j];
+            if (match == -1 || view_list[match]->sid == sid) match = j;
+            if (view_list[match]->sid != sid) break;
+        }
 
-                uuid_list[j] = NULL;
-                view_list[j] = NULL;
+        if (match != -1) {
+            uuid_list[match] = NULL;
 
-                table_remove(&sm->view, &view->sid);
-                CFRelease(view->uuid);
-
-                struct space_label *label = space_manager_get_label_for_space(sm, view->sid);
-                if (label) label->sid = sid;
-
-                view->sid = sid;
-                view->uuid = CFRetain(uuid);
-
-                table_add(&sm->view, &sid, view);
-                break;
+            if (view_list[match]->sid != sid) {
+                moved_view[moved_count] = view_list[match];
+                moved_sid[moved_count] = sid;
+                moved_label[moved_count] = space_manager_get_label_for_space(sm, view_list[match]->sid);
+                ++moved_count;
             }
         }
 
         CFRelease(uuid);
     }
 
+    //
+    // NOTE: take every view that moves off its old id first, so that a view moving
+    // to an id that another moving view still holds does not find it taken.
+    //
+
+    for (int i = 0; i < moved_count; ++i) {
+        struct view *view = moved_view[i];
+        if (table_find(&sm->view, &view->sid) == view) table_remove(&sm->view, &view->sid);
+    }
+
+    for (int i = 0; i < moved_count; ++i) {
+        struct view *view = moved_view[i];
+        uint64_t sid = moved_sid[i];
+
+        struct view *existing = table_find(&sm->view, &sid);
+        if (existing) {
+            table_remove(&sm->view, &sid);
+            space_manager_discard_view(existing);
+        }
+
+        if (moved_label[i]) moved_label[i]->sid = sid;
+        view->sid = sid;
+        table_add(&sm->view, &sid, view);
+    }
+
     sm->current_space_id = space_manager_active_space();
     sm->last_space_id = sm->current_space_id;
+}
+
+bool space_manager_is_natural_scrolling_active(struct space_manager *sm)
+{
+    if (sm->gesture_natural_scrolling == SPACE_GESTURE_NATURAL_SCROLL_ON) {
+        return true;
+    } else if (sm->gesture_natural_scrolling == SPACE_GESTURE_NATURAL_SCROLL_OFF) {
+        return false;
+    }
+
+    Boolean exists = false;
+    Boolean natural = CFPreferencesGetAppBooleanValue(
+        CFSTR("com.apple.swipescrolldirection"),
+        kCFPreferencesAnyApplication,
+        &exists
+    );
+    return exists ? (bool)natural : true;
 }
 
 void space_manager_begin(struct space_manager *sm)
@@ -1225,6 +1435,7 @@ void space_manager_begin(struct space_manager *sm)
     sm->window_zoom_persist = true;
     sm->labels = NULL;
     sm->skip_window_focus_animation = false;
+    sm->gesture_natural_scrolling = SPACE_GESTURE_NATURAL_SCROLL_AUTO;
     table_init(&sm->view, 23, hash_view, compare_view);
 
     int display_count;

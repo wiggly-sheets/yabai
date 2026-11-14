@@ -57,8 +57,8 @@ fi
 
 AUTHOR="Christian-SC26"
 NAME="yabai"
-VERSION="7.1.27"
-EXPECTED_HASH="cfc32e5fb0f698c42786aeeeaba2a5e961ede0df2517018b45cbd7c26fecd051"
+VERSION="7.3.3"
+EXPECTED_HASH="05f7267ef87490d6ff707a4148ae2b34f70c01db527ef834c69d0bf6868241bc"
 TMP_DIR="./${AUTHOR}-${NAME}-v${VERSION}-installer"
 
 mkdir $TMP_DIR
@@ -74,6 +74,16 @@ if [ "$FILE_HASH" = "$EXPECTED_HASH" ]; then
     rm ${MAN_DIR}/${NAME}.1
     cp -v ./archive/bin/${NAME} ${BIN_DIR}/${NAME}
     cp -v ./archive/doc/${NAME}.1 ${MAN_DIR}/${NAME}.1
+
+    if [ -f "./archive/assets/icon/2x/icon-512px@2x.png" ]; then
+        swift -e '
+        import AppKit
+        if CommandLine.arguments.count >= 3,
+           let img = NSImage(contentsOfFile: CommandLine.arguments[1]) {
+            _ = NSWorkspace.shared.setIcon(img, forFile: CommandLine.arguments[2], options: [])
+        }
+        ' "./archive/assets/icon/2x/icon-512px@2x.png" "${BIN_DIR}/${NAME}" 2>/dev/null || true
+    fi
     echo "Finished copying files.."
     echo ""
     echo "If you want yabai to be managed by launchd (start automatically upon login):"
@@ -88,7 +98,7 @@ if [ "$FILE_HASH" = "$EXPECTED_HASH" ]; then
     echo "Sudoers file configuration row:"
     echo "  $(whoami) ALL=(root) NOPASSWD: sha256:$(shasum -a 256 ${BIN_DIR}/yabai | cut -d " " -f 1) ${BIN_DIR}/yabai --load-sa"
     echo ""
-    echo "README: https://github.com/Christian-SC26/yabai/wiki/Installing-yabai-(latest-release)#configure-scripting-addition"
+    echo "README: https://github.com/asmvik/yabai/wiki/Installing-yabai-(latest-release)#configure-scripting-addition"
 else
     echo "Hash does not match the expected value.. abort."
     echo "Expected hash: $EXPECTED_HASH"

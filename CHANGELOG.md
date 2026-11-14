@@ -6,6 +6,191 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [7.3.3] - 2026-11-11
+### Fixed
+- **Switching to an application running under a debugger**: An application launched from Xcode could not be reached with `cmd + tab` or the Dock while its windows were on another space. yabai ignores such processes so that one stopped at a breakpoint cannot block it, and their activations were dropped too. yabai now follows them to their space through WindowServer, still without sending them any accessibility request
+- **Stacks past 32 windows**: yabai keeps the windows of a stack in one layout node with room for 32 of them. `window --stack` and dropping a window onto a stack with the mouse refused a window past that limit, but two other ways into a stack never checked it:
+  - a window that appeared on a space with `layout stack` (opened, deminimized, moved there from another space or unfloated). Such a space is a single node, so the limit is 32 windows per space
+  - a window opened after `window --insert stack` on a BSP space, when the stack it was meant for was already full
+
+  The 33rd window was written past the end of the node's window list, over the window order, the window count, the split ratio and the insert feedback state of that node. The layout went wrong from then on, and yabai could crash. Now a window past the limit of a stack layout stays out of the layout where it is, like a window on a space with `layout float`, and a window meant for a full stack on a BSP space gets a tile of its own next to the stack. Found by the new benchmarks in `bench/`, which crashed on a stack of 64 windows
+- **Full stacks with `window --stack` and mouse drops**: Both refused a window one place early, at 31 windows. And when the stack really was full, `window --stack` had already taken the window out of its tile, so it was left out of the layout. A stack now takes up to 32 windows, and a full one leaves the window where it was. A window yabai could not tile is no longer counted as managed either
+- **Insert feedback in stacks**: The insert feedback of a stack was tied to the window that was in front when it was shown. Focusing, swapping or stacking another window in front, or removing the front one, left it ordered against the wrong window or pointing at a node that no longer existed, which could crash yabai. Ending a drag on an error path also left the drag feedback on screen. The feedback now follows the front window of its stack and is always cleaned up
+- **Rule order after removing a rule**: `rule --remove` and expired one-shot rules moved the last rule into the gap. Rules are applied in the order they were added, so this could change which rule won. Removing a rule now keeps the order of the others
+- **Clients that stop talking to the daemon**: A `yabai -m` client that connected and then stopped sending or reading held up all window management until it went away. Messages with a zero, negative or huge length were trusted too. The daemon now gives a client one second and refuses lengths outside 2 bytes to 1 MB
+- **Bursts of events**: Under a long burst of events the event queue could wrap around and overwrite events that had not been handled yet. It now waits for room, and the mouse and event loop threads drop the event instead, since they cannot wait without deadlocking
+- **Layout of a display that comes back**: When a display came back, the fresh empty view macOS triggered for one of its new spaces could take the place of the view that held the layout. The view with the layout now wins
+- **Long window lists sent to the Dock**: Lists of window ids for animations, ordering and moving windows between spaces were packed into one fixed 4 KB message and ran past it with about a thousand windows. They are now sent in several messages, and the Dock reads a list only as far as the bytes it received. The scripting addition is now 2.1.38, so run `sudo yabai --load-sa` once after upgrading
+- **Previous and next space**: `space --focus prev` and `next` now read space ids the same way as the rest of the macOS 27 code. An unknown space gives an error instead of jumping to the last space, and `space --move` to a missing space reports it
+- **Layout and session files with wrong value types**: A string where a number was expected, or the other way round, raised an Objective-C exception and stopped the daemon. Such values are now skipped, and a tree that cannot be rebuilt puts its windows back the usual way
+- **Smaller crash fixes and leaks**: yabai now handles a display without a uuid, short WindowServer notifications, a full signal buffer, two mouse buttons pressed while a click is held, more than 512 animated windows reported to JankyBorders, deep layout trees and stacks with many windows without crashing. Leaks of accessibility elements and of rule scratchpad names are fixed
+
+## [7.3.2] - 2026-11-05
+### Fixed
+- **Switching to an application with native tabs**: With `window_native_tabs on`, activating an application from the Dock or with a hotkey could take several tries to reach its space. A hidden tab keeps reporting the space it was last shown on after its group moves to another space, so yabai thought the application already had a window on screen and stayed put. Hidden tabs no longer count when yabai decides where an application is
+
+## [7.3.1] - 2026-11-04
+### Fixed
+- **Native Tab Opacity ([#9](https://github.com/Christian-SC26/yabai/issues/9))**:
+  - With `window_opacity on`, a tab opened with `cmd + t` kept `normal_window_opacity` although it had focus. It now gets `active_window_opacity` right away
+  - Switching tabs no longer flashes the selected tab at `normal_window_opacity` for a moment. The tab being hidden was dimmed while still on screen and came back that way when it was selected again
+  - After `window_opacity off`, the other tabs of a group stayed dimmed and showed up that way when selected. A tab now gets the opacity it should have when it is shown
+
+## [7.3.0] - 2026-11-03
+### Added
+- **Native macOS Tabs in a Single Tile (`window_native_tabs`)**:
+  - With `yabai -m config window_native_tabs on`, the tabs of an application such as Terminal, Finder or Ghostty share one tile, so opening, switching and closing tabs no longer changes the layout. The setting is off by default
+  - Only the selected tab sits in the layout. yabai follows tab switches through WindowServer events (`1325`, `1326`, `815`) and `AXFocusedTabChanged` instead of guessing from window frames, so holding `cmd + t`, `Merge All Windows` and dragging a tab between windows keep the layout intact
+  - A tab dragged out of the tab bar becomes its own tile, and the tabs that exist when the setting is enabled are picked up right away
+  - `--warp`, `--swap`, `--stack` and `zoom-fullscreen` act on the group, and a floating group stays floating when tabs are switched, opened or closed
+  - Based on the work of @jpatrolla in asmvik/yabai#68 ([#9](https://github.com/Christian-SC26/yabai/issues/9))
+
+### Fixed
+- **Keyboard Focus After Leaving Mission Control**:
+  - Leaving Mission Control any other way than with escape, such as with a gesture, left the application in front without a key window, so the keyboard reached nothing until the next click. The restored window is now made the key window
+
+## [7.2.1] - 2026-11-02
+### Fixed
+- **Tiled Window Staying Resized After a Mouse Resize**:
+  - Releasing a mouse resize skipped the BSP adjustment when the cursor stopped before the button came up. A window resized from an edge with no split stayed outside its tile, and with `mouse_bsp_live_resize off` the split was not updated. Both now apply on release, and a stationary click still changes nothing
+  - With `mouse_bsp_live_resize on`, a drag that had already moved a split could stretch the window along the axis with no split, and it stayed that way after release. Those steps are now ignored
+
+## [7.2.0] - 2026-10-30
+### Added
+- **Swipe Down in Mission Control Selects the Window Under the Cursor (macOS 27)**:
+  - Leaving Mission Control with a swipe down now switches to the window under the cursor, on the current space or another one, the same way a click does. Escape, or a swipe with the cursor over empty space, still returns to the window Mission Control was opened from
+  - yabai finds the window through the accessibility elements that WindowManager exposes for each Mission Control thumbnail. A window on another space is only selected if you moved the cursor, so a space macOS showed by itself is never selected by accident
+
+### Fixed
+- **Mission Control Jumping to Another Space When Opened (macOS 27.2)**:
+  - When Mission Control opens, macOS 27.2 activates an app on another space by itself and Mission Control shows that space ([#7](https://github.com/Christian-SC26/yabai/issues/7)). yabai now puts the app you opened Mission Control from back in front right away, so Mission Control stays on your space and cancelling no longer flashes the other one
+- **Mission Control Noticed Late After a Swipe**:
+  - yabai checks for Mission Control right after a vertical swipe, instead of waiting for the next window or app event
+
+## [7.1.40] - 2026-10-30
+### Fixed
+- **App Hotkeys Ignored After Cancelling Mission Control**:
+  - On macOS 27 the Dock does not always report that Mission Control closed (e.g. cancelled with escape). yabai kept treating app activations as happening inside Mission Control, so app hotkeys only moved menu bar focus for up to ~10 seconds, and the first one was overridden by the late return to the original space. yabai now notices the exit within ~0.3s and returns right away
+- **Clicking a Window in Mission Control**:
+  - Clicking a window on the current space no longer restores focus to the previously focused window
+  - After clicking a window on another space, cancelling the next Mission Control no longer bounces between two spaces
+
+### Known issues
+- **macOS 27.2 activates an app on another space when Mission Control opens**:
+  - Opening Mission Control activates an app from another space (on our machine, the one on the last space) and switches the preview to its space. This also happens with yabai stopped. yabai returns to the original space when Mission Control is cancelled, so the other space shows briefly. Details and how to report it to Apple: [#7](https://github.com/Christian-SC26/yabai/issues/7)
+
+## [7.1.39] - 2026-10-29
+### Added
+- **`space --move`, `--swap` and `--display` on macOS 27.2**:
+  - macOS 27.2 removed the Dock function that the scripting addition called to move a space. The scripting addition (2.1.37) now moves spaces through the WindowServer with `SLSMoveManagedSpaceToDisplayIndex`, the call the Dock itself uses when it adds a space. The Dock keeps its own space list in sync, so Mission Control shows the new order. Tested on one and two displays, including moving the active space
+- **Release check for the scripting-addition version**:
+  - `scripts/check-osax-version.sh` fails when `src/osax` changed since the last tag but `OSAX_VERSION` did not. It runs first in `scripts/release.sh` and in CI for changes to `src/osax`
+
+## [7.1.38] - 2026-10-29
+### Fixed
+- **Scripting Addition Not Updating (macOS 27.2 payload never installed)**:
+  - Bumped the scripting-addition version to 2.1.36. The payload changed in 7.1.29 and 7.1.31 without a version bump, so `sudo yabai --load-sa` kept the payload from 7.1.27 installed. On macOS 27.2 that payload matched `moveSpace` and the desktop picture manager with macOS 27.0/27.1 patterns, although those Dock functions no longer exist in 27.2
+- **`space --move` Reporting Success on macOS 27.2**:
+  - yabai now checks the capabilities reported by the scripting addition before moving a space, and returns an error when the Dock functions it needs are missing, instead of exiting with status 0 and doing nothing
+- **Possible Hang in `window --toggle native-fullscreen`**:
+  - The wait for the window's space to become active is now limited to 3 seconds instead of looping indefinitely on the event loop thread
+
+## [7.1.37] - 2026-10-29
+### Fixed
+- **Multi-Space Jumps Without the Scripting Addition (SIP enabled) on macOS 27**:
+  - Jumping across several spaces with `yabai -m space --focus` (e.g. 4 -> 1) could stop one space short, because the 25ms pause between synthesized swipes let the Dock drop a step. Steps are now posted back to back, and the ended phase uses the same 9999 velocity as InstantSpaceSwitcher ([asmvik#2822](https://github.com/asmvik/yabai/issues/2822))
+
+## [7.1.36] - 2026-10-29
+### Fixed
+- **App Activation Not Switching to the App's Space**:
+  - After `yabai -m space --focus` (scripting addition), the previous front process stayed active although none of its windows were visible, so re-activating it (e.g. via an app hotkey) produced no front-switched event and no space switch. `SPACE_CHANGED` now hands focus to the top window of the new space, or to Finder when the space is empty
+- **Bouncing Away From Empty Spaces**:
+  - Focusing an empty space made the system activate the next application in its activation order, and `skip_window_focus_animation` followed it to that application's space. The automatic space switch is now suppressed for 400ms after focusing an empty space
+
+## [7.1.35] - 2026-10-29
+### Added
+- **Non-Natural Scrolling Space Switching (`space_gesture_natural_scrolling`)**:
+  - Automatically detect macOS natural scrolling system preference (`com.apple.swipescrolldirection`) when synthesizing Dock space gestures, inverting gesture swipe velocity when natural scrolling is disabled ([#6](https://github.com/Christian-SC26/yabai/issues/6))
+  - Added `yabai -m config space_gesture_natural_scrolling auto|on|off` to allow manual override
+
+## [7.1.34] - 2026-10-26
+### Fixed
+- **Multi-Monitor Window Drag & Drop Retiling and Gaps**:
+  - Skip retiling windows under the cursor mid-drag when crossing display boundaries (`g_mouse_state.window`), preserving drop feedback and waiting for mouse release (`MOUSE_UP`) ([asmvik#2843](https://github.com/asmvik/yabai/issues/2843))
+  - Immediately flush the vacated visible view on the source display (`window_node_flush`) to prevent lingering empty gaps
+- **Focus-Follows-Mouse Menu Lockup Prevention**:
+  - Track open menus per application process (`open_menus` on `struct application`) instead of a single global counter, preventing permanent autofocus lockouts when apps crash or close menus without posting notifications ([asmvik#2834](https://github.com/asmvik/yabai/issues/2834))
+  - Clear application menu counts on `APPLICATION_TERMINATED`
+  - Added `event_loop_reset_open_menus()` to allow immediate recovery whenever `yabai -m config focus_follows_mouse` is set
+- **Tracking Windows Restored on Inactive Spaces at Launch**:
+  - Call `window_manager_add_existing_application_windows` on application launch to discover windows restored on inactive spaces via remote token fallback, resolving untracked windows after background updates ([asmvik#2833](https://github.com/asmvik/yabai/issues/2833))
+- **Accurate Drop Feedback for Stack Layouts**:
+  - Map insert feedback direction to `STACK` when dragging onto a space with stack layout, accurately highlighting the entire stack instead of showing a misleading split preview ([asmvik#2840](https://github.com/asmvik/yabai/issues/2840))
+- **Scripting Addition Build Dependency in Makefile**:
+  - Add `arm64_payload.m`, `x64_payload.m`, and `common.h` to `OSAX_SRC` make prerequisites to prevent stale payload caching and version-mismatch Dock restart loops ([asmvik#2846](https://github.com/asmvik/yabai/issues/2846))
+
+## [7.1.33] - 2026-10-26
+### Fixed
+- **BSP Split Live Mouse Resizing Performance & Smoothness**:
+  - Respect `animate = false` during live interactive BSP split resizing (`MOUSE_DRAGGED`), avoiding redundant `CVDisplayLink` animation cycles, thread creation, window proxies, and screenshot captures ([#5](https://github.com/Christian-SC26/yabai/issues/5))
+  - Added `view_flush_direct` and `window_node_flush_direct` to immediately position resized windows via Accessibility APIs
+  - Optimize layout updates to skip redundant Accessibility IPC calls for windows whose geometry did not change
+  - Added drag and mouse move event coalescing in `event_loop_run` to prevent event queue buildup from high-polling-rate mice and Apple trackpads
+  - Set 30 FPS (`33 ms`) update rate for multi-window live BSP resizing to reduce IPC overhead on running applications, while preserving 60 FPS (`16 ms`) for floating and lone tiled windows
+
+### Added
+- **Configurable Live vs Classic BSP Resizing (`mouse_bsp_live_resize`)**:
+  - Added `yabai -m config mouse_bsp_live_resize <on|off>` (alias `mouse_live_resize`)
+  - `on` (default): Real-time live split adjustment with neighboring windows updating as you drag
+  - `off`: Classic yabai behavior, resizing only the grabbed window live and snapping neighboring windows to the BSP grid upon mouse release (`MOUSE_UP`)
+
+## [7.1.32] - 2026-10-25
+### Fixed
+- **Mission Control Window Focus & Menu Bar Synchronization**:
+  - Prevent spurious window focus shifts and menu bar desynchronization caused by hovering thumbnails in Mission Control
+  - Intercept and suppress synthetic window activations during and immediately after Mission Control cancellation gestures
+  - Force macOS front application and menu bar owner back to the previously active window upon Mission Control exit
+  - Ensure thread-safe Mission Control detection across event tap and event loop threads
+- **Configuration & Space Switching Defaults**:
+  - Restore default `skip_window_focus_animation` to `off` (`false`) to prevent unwanted space jumps when activating applications with off-space windows ([#4](https://github.com/Christian-SC26/yabai/issues/4))
+  - Preserve original upstream documentation behavior for scripting addition setups and document opening workflows
+
+## [7.1.31] - 2026-10-25
+### Fixed
+- **Scripting Addition (SIP OFF) macOS 27 Handshake & Validation Compatibility**:
+  - Dynamically adapt expected capability mask based on the running macOS version (`OSAX_ATTRIB_REDUCED` = `0x4D` on macOS 27.2+, `OSAX_ATTRIB_ALL` = `0x7F` on macOS <= 27.1), resolving `--load-sa` validation failure (`payload (0x4D) doesn't support this macOS version!`) on macOS 27.2+ ([#3](https://github.com/Christian-SC26/yabai/issues/3))
+  - Restored verified hook patterns and offsets (`dppm`, `move_space`, `set_front_window`) for macOS 27.0 and 27.1 in `arm64_payload.m` while keeping them safely guarded on macOS 27.2+
+- **Focus & Menu Bar Owner Synchronization**:
+  - Synchronize menu bar application owner with the focused window across spaces to prevent menu bar title and status desynchronization
+  - Eliminate focus theft during rapid application switching and trackpad gestures
+- **Space Switching & Gesture Rate Limiting**:
+  - Ensure instant 1st-press responsiveness for space switching hotkeys
+  - Guard against runaway space switching loops and ping-pong oscillation during rapid multi-touch gestures
+  - Restore correct focus when dismissing Mission Control
+
+## [7.1.30] - 2026-09-29
+### Fixed
+- **Mouse Handler Teardown Race & Crash Guard**:
+  - Explicitly retain the mouse handler thread's `CFRunLoopRef` on creation and release it only after `pthread_join()` in `mouse_handler_end()` ([#2](https://github.com/Christian-SC26/yabai/pull/2))
+  - Resolves a use-after-free crash (`EXC_BREAKPOINT / SIGTRAP` in `__CFCheckCFInfoPACSignature` / `CFRunLoopRemoveSource`) during rapid reconfiguration of `focus_follows_mouse` or mouse rules on modern macOS / Apple Silicon
+
+## [7.1.29] - 2026-09-26
+### Changed
+- **Scripting Addition (SIP OFF) macOS 27 Enhancements**:
+  - Added support for `arm64e.x1` slice on modern Apple Silicon chips (M4 and newer) by wildcarding function prologues (`?? ?? ?? ??`) to match both `pacibsp` and `pacibsppc` instructions during `Dock.app` opcode scanning [#2832](https://github.com/asmvik/yabai/issues/2832)
+  - Corrected `currentSpaceForDisplay:` invocation in OSAX payload to pass `CGDirectDisplayID` resolved via `-[Spaces displayForSPID:]`, matching the macOS 27.2 `@20@0:8I16` signature
+  - Added NULL/nil guards across `do_space_move`, `do_space_destroy`, `do_space_create`, and `do_space_focus` to prevent `Dock.app` crashes when handling unknown or disappearing spaces
+  - Calibrated pattern scan offsets for `add_space`, `remove_space`, and space transition animation duration on macOS 27.2
+
+## [7.1.28] - 2026-09-26
+### Changed
+- **Clean Instant Space Switching with SIP Enabled on macOS 27 (Golden Gate)**:
+  - Instant space switching (`yabai -m space --focus <index|recent|prev|next>`) works fully out-of-the-box with System Integrity Protection (SIP) enabled, with no animation delay and without requiring SIP disabling or scripting addition injection.
+  - Implemented reverse-engineered IOHIDSystemQueue fluid touch gesture serialization (field 4205 payload) with calibrated polarity and multi-step phase timing (1ms phase, 25ms step intervals), ensuring seamless multi-space transitions (e.g., 1 -> 3, 4 -> 1).
+  - Fixed ghost window duplication and menu bar stacking artifacts by synchronizing transitions through Dock's native space pipeline rather than isolated display space switching.
+  - Automatically enables required horizontal trackpad gesture preference if missing, ensuring smooth gesture dispatch by `Dock.app`.
+  - Seamlessly falls back to scripting addition payload when running with SIP disabled.
+
 ## [7.1.27] - 2026-09-22
 ### Changed
 - Full support for macOS 27 beta 2 (macOS 27.2, build 26B5091g) Dock.app opcode offsets, pattern signatures, and updated `Dock.Spaces` selectors (`currentSpaceForDisplay:`)
@@ -833,7 +1018,23 @@ The *window_destroyed* signal is now triggered for windows that are implicitly d
 ### Added
 - First official release
 
-[Unreleased]: https://github.com/Christian-SC26/yabai/compare/v7.1.26...HEAD
+[Unreleased]: https://github.com/Christian-SC26/yabai/compare/v7.3.3...HEAD
+[7.3.3]: https://github.com/Christian-SC26/yabai/compare/v7.3.2...v7.3.3
+[7.3.2]: https://github.com/Christian-SC26/yabai/compare/v7.3.1...v7.3.2
+[7.3.1]: https://github.com/Christian-SC26/yabai/compare/v7.3.0...v7.3.1
+[7.3.0]: https://github.com/Christian-SC26/yabai/compare/v7.2.1...v7.3.0
+[7.2.1]: https://github.com/Christian-SC26/yabai/compare/v7.2.0...v7.2.1
+[7.2.0]: https://github.com/Christian-SC26/yabai/compare/v7.1.40...v7.2.0
+[7.1.40]: https://github.com/Christian-SC26/yabai/compare/v7.1.39...v7.1.40
+[7.1.39]: https://github.com/Christian-SC26/yabai/compare/v7.1.38...v7.1.39
+[7.1.38]: https://github.com/Christian-SC26/yabai/compare/v7.1.37...v7.1.38
+[7.1.37]: https://github.com/Christian-SC26/yabai/compare/v7.1.36...v7.1.37
+[7.1.36]: https://github.com/Christian-SC26/yabai/compare/v7.1.35...v7.1.36
+[7.1.35]: https://github.com/Christian-SC26/yabai/compare/v7.1.34...v7.1.35
+[7.1.34]: https://github.com/Christian-SC26/yabai/compare/v7.1.33...v7.1.34
+[7.1.33]: https://github.com/Christian-SC26/yabai/compare/v7.1.32...v7.1.33
+[7.1.32]: https://github.com/Christian-SC26/yabai/compare/v7.1.31...v7.1.32
+[7.1.31]: https://github.com/Christian-SC26/yabai/compare/v7.1.30...v7.1.31
 [7.1.26]: https://github.com/Christian-SC26/yabai/compare/v7.1.25...v7.1.26
 [7.1.25]: https://github.com/Christian-SC26/yabai/compare/v7.1.24...v7.1.25
 [7.1.24]: https://github.com/Christian-SC26/yabai/compare/v7.1.23...v7.1.24

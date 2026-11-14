@@ -2,6 +2,7 @@ extern int g_connection;
 extern struct display_manager g_display_manager;
 extern struct space_manager g_space_manager;
 extern struct window_manager g_window_manager;
+extern struct mouse_state g_mouse_state;
 
 #define INSERT_FEEDBACK_WIDTH 2
 #define INSERT_FEEDBACK_RADIUS 9
@@ -59,7 +60,8 @@ void insert_feedback_show(struct window_node *node)
         CGContextFlush(node->feedback_window.context);
         SLSReenableUpdate(g_connection);
         SLSOrderWindow(g_connection, node->feedback_window.id, 1, node->window_order[0]);
-        table_add(&g_window_manager.insert_feedback, &node->window_order[0], node);
+        node->feedback_window.wid = node->window_order[0];
+        table_add(&g_window_manager.insert_feedback, &node->feedback_window.wid, node);
         if (!workspace_is_macos_sequoia() && !(workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
             update_window_notifications();
         }
@@ -125,7 +127,7 @@ void insert_feedback_show(struct window_node *node)
 void insert_feedback_destroy(struct window_node *node)
 {
     if (node->feedback_window.id) {
-        table_remove(&g_window_manager.insert_feedback, &node->window_order[0]);
+        table_remove(&g_window_manager.insert_feedback, &node->feedback_window.wid);
 
         if (!workspace_is_macos_sequoia() && !(workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
             update_window_notifications();
@@ -135,6 +137,32 @@ void insert_feedback_destroy(struct window_node *node)
         CGContextRelease(node->feedback_window.context);
         SLSReleaseWindow(g_connection, node->feedback_window.id);
         memset(&node->feedback_window, 0, sizeof(struct feedback_window));
+    }
+}
+
+//
+// NOTE: insert_feedback maps the front window of a node to the node, so that the
+// feedback can be ordered above that window when it moves. The entry is keyed by
+// the window the feedback was registered for, kept in feedback_window.wid. Call
+// this after the front window of a node with feedback changes, or after its
+// feedback moves to another node.
+//
+
+void insert_feedback_rekey(struct window_node *node)
+{
+    if (!node->feedback_window.id) return;
+
+    table_remove(&g_window_manager.insert_feedback, &node->feedback_window.wid);
+    node->feedback_window.wid = node->window_order[0];
+    table_remove(&g_window_manager.insert_feedback, &node->feedback_window.wid);
+    table_add(&g_window_manager.insert_feedback, &node->feedback_window.wid, node);
+
+    SLSSetWindowLevel(g_connection, node->feedback_window.id, window_level(node->window_order[0]));
+    SLSSetWindowSubLevel(g_connection, node->feedback_window.id, window_sub_level(node->window_order[0]));
+    SLSOrderWindow(g_connection, node->feedback_window.id, 1, node->window_order[0]);
+
+    if (!workspace_is_macos_sequoia() && !(workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
+        update_window_notifications();
     }
 }
 
@@ -258,7 +286,7 @@ static inline bool window_node_is_intermediate(struct window_node *node)
 
 static inline bool window_node_is_leaf(struct window_node *node)
 {
-    return node->left == NULL && node->right == NULL;
+    return node && node->left == NULL && node->right == NULL;
 }
 
 static inline bool window_node_is_left_child(struct window_node *node)
@@ -511,6 +539,7 @@ static void window_node_destroy(struct window_node *node)
     }
 
     insert_feedback_destroy(node);
+    if (g_mouse_state.feedback_node == node) g_mouse_state.feedback_node = NULL;
     free(node);
 }
 
@@ -545,6 +574,25 @@ void window_node_flush(struct window_node *node)
     struct window_capture *window_list = NULL;
     window_node_capture_windows(node, &window_list);
     if (window_list) window_manager_animate_window_list(window_list, ts_buf_len(window_list));
+}
+
+void window_node_flush_direct(struct window_node *node)
+{
+    struct window_capture *window_list = NULL;
+    window_node_capture_windows(node, &window_list);
+    if (window_list) {
+        int window_count = ts_buf_len(window_list);
+        for (int i = 0; i < window_count; ++i) {
+            struct window *window = window_list[i].window;
+            if (window->frame.origin.x != window_list[i].x ||
+                window->frame.origin.y != window_list[i].y ||
+                window->frame.size.width != window_list[i].w ||
+                window->frame.size.height != window_list[i].h) {
+                window_manager_set_window_frame(window, window_list[i].x, window_list[i].y, window_list[i].w, window_list[i].h);
+                window->frame = (CGRect){{window_list[i].x, window_list[i].y}, {window_list[i].w, window_list[i].h}};
+            }
+        }
+    }
 }
 
 bool window_node_contains_window(struct window_node *node, uint32_t window_id)
@@ -585,12 +633,15 @@ void window_node_swap_window_list(struct window_node *a_node, struct window_node
 
     a_node->zoom = NULL;
     b_node->zoom = NULL;
+
+    insert_feedback_rekey(a_node);
+    insert_feedback_rekey(b_node);
 }
 
 struct window_node *window_node_find_first_leaf(struct window_node *root)
 {
     struct window_node *node = root;
-    while (!window_node_is_leaf(node)) {
+    while (node && !window_node_is_leaf(node)) {
         node = node->left;
     }
     return node;
@@ -599,7 +650,7 @@ struct window_node *window_node_find_first_leaf(struct window_node *root)
 struct window_node *window_node_find_last_leaf(struct window_node *root)
 {
     struct window_node *node = root;
-    while (!window_node_is_leaf(node)) {
+    while (node && !window_node_is_leaf(node)) {
         node = node->right;
     }
     return node;
@@ -693,18 +744,27 @@ struct window_node *window_node_fence(struct window_node *node, int dir)
 
 struct window_node *view_find_min_depth_leaf_node(struct window_node *node)
 {
+    //
+    // NOTE: breadth-first, so the first leaf found is the shallowest. Once the
+    // queue is full, the nodes already in it are still checked but their children
+    // are not queued, and a tree with no leaf in its first 256 nodes falls back to
+    // the first leaf.
+    //
+
     struct window_node *list[256] = { node };
 
-    for (int i = 0, j = 0; i < 256; ++i) {
+    for (int i = 0, j = 0; i <= j; ++i) {
         if (window_node_is_leaf(list[i])) {
             return list[i];
         }
 
-        list[++j] = list[i]->left;
-        list[++j] = list[i]->right;
+        if (j + 2 < (int) array_count(list)) {
+            list[++j] = list[i]->left;
+            list[++j] = list[i]->right;
+        }
     }
 
-    return NULL;
+    return window_node_find_first_leaf(node);
 }
 
 static inline bool area_is_in_direction(struct area *r1, CGPoint r1_max, struct area *r2, CGPoint r2_max, int direction)
@@ -787,6 +847,24 @@ struct window_node *view_find_window_node(struct view *view, uint32_t window_id)
     return NULL;
 }
 
+bool view_swap_node_window(struct view *view, uint32_t old_wid, uint32_t new_wid)
+{
+    struct window_node *node = view_find_window_node(view, old_wid);
+    if (!node) return false;
+
+    bool rekey = node->window_order[0] == old_wid;
+    if (view->insertion_point == old_wid) view->insertion_point = new_wid;
+
+    for (int i = 0; i < node->window_count; ++i) {
+        if (node->window_list[i]  == old_wid) node->window_list[i]  = new_wid;
+        if (node->window_order[i] == old_wid) node->window_order[i] = new_wid;
+    }
+
+    if (rekey) insert_feedback_rekey(node);
+
+    return true;
+}
+
 struct window_node *view_remove_window_node(struct view *view, struct window *window)
 {
     struct window_node *node = view_find_window_node(view, window->id);
@@ -811,6 +889,8 @@ struct window_node *view_remove_window_node(struct view *view, struct window *wi
         assert(removed_entry);
         assert(removed_order);
         --node->window_count;
+
+        if (node->window_order[0] != node->feedback_window.wid) insert_feedback_rekey(node);
 
         if (view->insertion_point == window->id) {
             view->insertion_point = node->window_order[0];
@@ -853,6 +933,9 @@ struct window_node *view_remove_window_node(struct view *view, struct window *wi
         parent->split           = child->split;
         parent->child           = child->child;
         insert_feedback_show(parent);
+        insert_feedback_rekey(parent);
+    } else {
+        insert_feedback_destroy(child);
     }
 
     if (window_node_is_intermediate(child) && !window_node_is_leaf(child)) {
@@ -884,6 +967,15 @@ struct window_node *view_remove_window_node(struct view *view, struct window *wi
     }
 
     insert_feedback_destroy(node);
+
+    //
+    // NOTE: a drag can point at the feedback of either node. The feedback of the
+    // surviving child now belongs to its parent.
+    //
+
+    if (g_mouse_state.feedback_node == child) g_mouse_state.feedback_node = parent;
+    if (g_mouse_state.feedback_node == node)  g_mouse_state.feedback_node = NULL;
+
     free(child);
     free(node);
 
@@ -920,6 +1012,8 @@ void view_stack_window_node(struct window_node *node, struct window *window)
     memmove(node->window_order + 1, node->window_order, sizeof(uint32_t) * node->window_count);
     node->window_order[0] = window->id;
     ++node->window_count;
+
+    insert_feedback_rekey(node);
 }
 
 struct window_node *view_add_window_node_with_insertion_point(struct view *view, struct window *window, uint32_t insertion_point)
@@ -944,7 +1038,12 @@ struct window_node *view_add_window_node_with_insertion_point(struct view *view,
             view->insertion_point = prev_insertion_point;
 
             if (leaf) {
-                bool do_stack = leaf->insert_dir == STACK;
+                //
+                // NOTE: a stack holds at most NODE_MAX_WINDOW_COUNT windows. When the
+                // stack the window was meant for is full, the window gets a tile of its
+                // own next to it instead.
+                //
+                bool do_stack = leaf->insert_dir == STACK && leaf->window_count < NODE_MAX_WINDOW_COUNT;
 
                 leaf->insert_dir = 0;
                 insert_feedback_destroy(leaf);
@@ -980,6 +1079,13 @@ struct window_node *view_add_window_node_with_insertion_point(struct view *view,
 
         return leaf;
     } else if (view->layout == VIEW_STACK) {
+        //
+        // NOTE: a space with a stack layout is a single node, so it holds at most
+        // NODE_MAX_WINDOW_COUNT windows. A window past that is not added, and stays
+        // where it is like a window on a space with a float layout.
+        //
+        if (view->root->window_count >= NODE_MAX_WINDOW_COUNT) return NULL;
+
         view_stack_window_node(view->root, window);
         return view->root;
     }
@@ -1000,7 +1106,7 @@ uint32_t *view_find_window_list(struct view *view, int *window_count)
     uint32_t *window_list = ts_alloc_list(uint32_t, capacity);
 
     for (struct window_node *node = window_node_find_first_leaf(view->root); node; node = window_node_find_next_leaf(node)) {
-        if (*window_count + node->window_count >= capacity) {
+        while (*window_count + node->window_count > capacity) {
             ts_expand(window_list, sizeof(uint32_t) * capacity, sizeof(uint32_t) * capacity);
             capacity *= 2;
         }
@@ -1027,6 +1133,16 @@ void view_flush(struct view *view)
 {
     if (space_is_visible(view->sid)) {
         window_node_flush(view->root);
+        view_clear_flag(view, VIEW_IS_DIRTY);
+    } else {
+        view_set_flag(view, VIEW_IS_DIRTY);
+    }
+}
+
+void view_flush_direct(struct view *view)
+{
+    if (space_is_visible(view->sid)) {
+        window_node_flush_direct(view->root);
         view_clear_flag(view, VIEW_IS_DIRTY);
     } else {
         view_set_flag(view, VIEW_IS_DIRTY);

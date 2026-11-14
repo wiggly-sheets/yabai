@@ -1,6 +1,69 @@
 extern struct event_loop g_event_loop;
 extern enum mission_control_mode g_mission_control_mode;
 extern volatile uint64_t __last_cmd_tab_time;
+extern volatile bool __pending_gesture;
+extern volatile uint64_t __last_gesture_time;
+extern struct window_manager g_window_manager;
+extern struct space_manager g_space_manager;
+extern struct process_manager g_process_manager;
+
+volatile uint32_t g_mission_control_prev_wid = 0;
+volatile uint64_t g_mission_control_prev_sid = 0;
+volatile pid_t g_mission_control_prev_pid = 0;
+volatile bool g_mission_control_mouse_clicked = false;
+volatile uint64_t g_mission_control_exit_time = 0;
+volatile bool g_mission_control_posted_exit = false;
+volatile uint32_t g_mission_control_hover_wid = 0;
+volatile bool g_mission_control_cursor_moved = false;
+volatile int g_mission_control_reverted_activations = 0;
+CGPoint g_mission_control_enter_cursor;
+
+static void mission_control_record_state_on_thread(bool on_event_tap)
+{
+    if (!__atomic_load_n(&g_mission_control_prev_sid, __ATOMIC_RELAXED)) {
+        uint32_t wid = g_window_manager.focused_window_id ? g_window_manager.focused_window_id : g_window_manager.last_window_id;
+        uint64_t sid = g_space_manager.current_space_id;
+        pid_t pid = g_process_manager.front_pid;
+
+        //
+        // NOTE: A space change that happened inside the previous Mission Control session was ignored,
+        // so current_space_id can be stale. The focused window knows which space the user is on.
+        //
+
+        //
+        // NOTE: at the start of a dock swipe this runs on the event tap thread, where
+        // the window table must not be read while the event loop changes it. There
+        // window_space alone tells whether the window still exists, giving 0 if not.
+        //
+
+        bool known = wid && (on_event_tap || window_manager_find_window(&g_window_manager, wid));
+        uint64_t wid_sid = known ? window_space(wid) : 0;
+        if (wid_sid && space_is_user(wid_sid) && space_is_visible(wid_sid)) sid = wid_sid;
+        if (sid) {
+            __atomic_store_n(&g_mission_control_prev_wid, wid, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_prev_pid, pid, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_prev_sid, sid, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_mouse_clicked, false, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_hover_wid, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_cursor_moved, false, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_reverted_activations, 0, __ATOMIC_RELEASE);
+            CGEventRef cursor_event = CGEventCreate(NULL);
+            g_mission_control_enter_cursor = CGEventGetLocation(cursor_event);
+            CFRelease(cursor_event);
+            debug("%s: recorded prev_wid=%d, prev_pid=%d, prev_sid=%lld\n", __FUNCTION__, wid, pid, sid);
+        }
+    }
+}
+
+void mission_control_record_state(void)
+{
+    mission_control_record_state_on_thread(false);
+}
+
+void mission_control_record_state_from_event_tap(void)
+{
+    mission_control_record_state_on_thread(true);
+}
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
@@ -9,17 +72,27 @@ static CONNECTION_CALLBACK(connection_handler)
     if (type == 1204) {
         event_loop_post(&g_event_loop, MISSION_CONTROL_ENTER, NULL, 0);
     } else if (type == 1327) {
-        uint64_t sid; memcpy(&sid, data, sizeof(uint64_t));
-        event_loop_post(&g_event_loop, SLS_SPACE_CREATED, (void *) (intptr_t) sid , 0);
+        uint64_t sid = 0; if (data && data_length >= sizeof(uint64_t)) memcpy(&sid, data, sizeof(uint64_t));
+        if (sid) event_loop_post(&g_event_loop, SLS_SPACE_CREATED, (void *) (intptr_t) sid , 0);
     } else if (type == 1328) {
-        uint64_t sid; memcpy(&sid, data, sizeof(uint64_t));
-        event_loop_post(&g_event_loop, SLS_SPACE_DESTROYED, (void *) (intptr_t) sid, 0);
+        uint64_t sid = 0; if (data && data_length >= sizeof(uint64_t)) memcpy(&sid, data, sizeof(uint64_t));
+        if (sid) event_loop_post(&g_event_loop, SLS_SPACE_DESTROYED, (void *) (intptr_t) sid, 0);
     } else if (type == 808) {
-        uint32_t wid; memcpy(&wid, data, sizeof(uint32_t));
-        event_loop_post(&g_event_loop, SLS_WINDOW_ORDERED, (void *) (intptr_t) wid, 0);
+        uint32_t wid = 0; if (data && data_length >= sizeof(uint32_t)) memcpy(&wid, data, sizeof(uint32_t));
+        if (wid) event_loop_post(&g_event_loop, SLS_WINDOW_ORDERED, (void *) (intptr_t) wid, 0);
     } else if (type == 804) {
-        uint32_t wid; memcpy(&wid, data, sizeof(uint32_t));
-        event_loop_post(&g_event_loop, SLS_WINDOW_DESTROYED, (void *) (intptr_t) wid, 0);
+        uint32_t wid = 0; if (data && data_length >= sizeof(uint32_t)) memcpy(&wid, data, sizeof(uint32_t));
+        if (wid) event_loop_post(&g_event_loop, SLS_WINDOW_DESTROYED, (void *) (intptr_t) wid, 0);
+    } else if (type == 815) {
+        uint32_t wid = 0; if (data && data_length >= sizeof(uint32_t)) memcpy(&wid, data, sizeof(uint32_t));
+        if (wid && g_window_manager.window_native_tabs) event_loop_post(&g_event_loop, SLS_WINDOW_VISIBLE, (void *) (intptr_t) wid, 0);
+    } else if (type == 1325 || type == 1326) {
+        // NOTE: space-membership payload is { u64 sid; u32 wid }, so the wid sits at offset 8.
+        uint32_t wid = 0;
+        if (data && data_length >= 12) memcpy(&wid, (char *) data + 8, sizeof(uint32_t));
+        if (wid && g_window_manager.window_native_tabs) {
+            event_loop_post(&g_event_loop, type == 1326 ? SLS_REMOVED_FROM_SPACE : SLS_ADDED_TO_SPACE, (void *) (intptr_t) wid, 0);
+        }
     } else if (type == 1202) {
         __atomic_store_n(&__last_cmd_tab_time, read_os_timer(), __ATOMIC_RELEASE);
     }
@@ -84,7 +157,7 @@ void mission_control_observe(void)
                 AXObserverAddNotification(g_mission_control_observer.observer_ref, g_mission_control_observer.ref, kAXExposeExit, NULL);
 
                 g_mission_control_observer.is_observing = true;
-                CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(g_mission_control_observer.observer_ref), kCFRunLoopDefaultMode);
+                CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(g_mission_control_observer.observer_ref), kCFRunLoopCommonModes);
             }
         }
     }
@@ -105,7 +178,102 @@ void mission_control_unobserve(void)
     }
 }
 
+//
+// NOTE: kept at file scope rather than inside mission_control_is_active, so that
+// the test suite can start every test without a cached Mission Control state.
+//
+static struct {
+    uint64_t last_check_time;
+    uint64_t absent_start_time;
+    bool cached_state;
+} g_mission_control_active_cache;
+
 static inline bool mission_control_is_active(void)
 {
-    return g_mission_control_mode != MISSION_CONTROL_MODE_INACTIVE;
+    static pthread_mutex_t mc_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+    pthread_mutex_lock(&mc_mutex);
+
+    uint64_t now = read_os_timer();
+    uint64_t dt_ms = (now > g_mission_control_active_cache.last_check_time) ? (now - g_mission_control_active_cache.last_check_time) / 1000000ULL : 0;
+    if (dt_ms < 50) {
+        bool res = g_mission_control_active_cache.cached_state || (g_mission_control_mode != MISSION_CONTROL_MODE_INACTIVE);
+        pthread_mutex_unlock(&mc_mutex);
+        return res;
+    }
+
+    g_mission_control_active_cache.last_check_time = now;
+
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    if (!list) {
+        g_mission_control_active_cache.cached_state = false;
+        bool res = g_mission_control_mode != MISSION_CONTROL_MODE_INACTIVE;
+        pthread_mutex_unlock(&mc_mutex);
+        return res;
+    }
+
+    int count = CFArrayGetCount(list);
+    bool detected_mc = false;
+
+    for (int i = 0; i < count; ++i) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        CFNumberRef layer_ref = CFDictionaryGetValue(d, kCGWindowLayer);
+        if (!layer_ref) continue;
+
+        int layer = 0;
+        CFNumberGetValue(layer_ref, kCFNumberIntType, &layer);
+        if (layer == 16 || layer == 17 || layer == 18 || layer == 19) {
+            CFStringRef owner = CFDictionaryGetValue(d, kCGWindowOwnerName);
+            if (owner && (CFEqual(owner, CFSTR("WindowManager")) || CFEqual(owner, CFSTR("Dock")))) {
+                detected_mc = true;
+                break;
+            }
+        }
+    }
+
+    CFRelease(list);
+
+    bool in_mc = false;
+    if (detected_mc) {
+        g_mission_control_active_cache.absent_start_time = 0;
+        in_mc = true;
+    } else {
+        bool gesture_in_progress = __atomic_load_n(&__pending_gesture, __ATOMIC_RELAXED);
+        uint64_t last_gesture_time = __atomic_load_n(&__last_gesture_time, __ATOMIC_RELAXED);
+        uint64_t dt_gesture_ms = (now > last_gesture_time) ? (now - last_gesture_time) / 1000000ULL : 0;
+
+        if (g_mission_control_mode != MISSION_CONTROL_MODE_INACTIVE || g_mission_control_active_cache.cached_state) {
+            if (gesture_in_progress || dt_gesture_ms < 150) {
+                g_mission_control_active_cache.absent_start_time = 0;
+                in_mc = true;
+            } else {
+                if (!g_mission_control_active_cache.absent_start_time) g_mission_control_active_cache.absent_start_time = now;
+                uint64_t absent_dt_ms = (now > g_mission_control_active_cache.absent_start_time) ? (now - g_mission_control_active_cache.absent_start_time) / 1000000ULL : 0;
+                if (absent_dt_ms < 150) {
+                    in_mc = true;
+                } else {
+                    in_mc = false;
+                    g_mission_control_active_cache.absent_start_time = 0;
+                }
+            }
+        } else {
+            in_mc = false;
+            g_mission_control_active_cache.absent_start_time = 0;
+        }
+    }
+
+    if (in_mc && g_mission_control_mode == MISSION_CONTROL_MODE_INACTIVE) {
+        mission_control_record_state();
+        g_mission_control_mode = MISSION_CONTROL_MODE_SHOW;
+        __atomic_store_n(&g_mission_control_posted_exit, false, __ATOMIC_RELEASE);
+        event_loop_post(&g_event_loop, MISSION_CONTROL_ENTER, NULL, 0);
+    } else if (!in_mc && g_mission_control_mode != MISSION_CONTROL_MODE_INACTIVE && !__atomic_load_n(&g_mission_control_posted_exit, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g_mission_control_posted_exit, true, __ATOMIC_RELEASE);
+        event_loop_post(&g_event_loop, MISSION_CONTROL_EXIT, NULL, 0);
+    }
+
+    g_mission_control_active_cache.cached_state = in_mc;
+    bool res = in_mc || (g_mission_control_mode != MISSION_CONTROL_MODE_INACTIVE);
+    pthread_mutex_unlock(&mc_mutex);
+    return res;
 }

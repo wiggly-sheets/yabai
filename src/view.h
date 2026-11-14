@@ -163,6 +163,7 @@ static const char *split_algorithm_str[] =
 struct feedback_window
 {
     uint32_t id;
+    uint32_t wid;
     CGContextRef context;
 };
 
@@ -246,9 +247,11 @@ struct view
 
 void insert_feedback_show(struct window_node *node);
 void insert_feedback_destroy(struct window_node *node);
+void insert_feedback_rekey(struct window_node *node);
 
 void window_node_flush(struct window_node *node);
 bool window_node_is_ancestor(struct window_node *node, struct window_node *descendant);
+void window_node_flush_direct(struct window_node *node);
 void window_node_update(struct view *view, struct window_node *node);
 bool window_node_contains_window(struct window_node *node, uint32_t window_id);
 int window_node_index_of_window(struct window_node *node, uint32_t window_id);
@@ -261,6 +264,7 @@ void window_node_capture_windows(struct window_node *node, struct window_capture
 
 struct window_node *view_find_window_node_in_direction(struct view *view, struct window_node *source, int direction);
 struct window_node *view_find_window_node(struct view *view, uint32_t window_id);
+bool view_swap_node_window(struct view *view, uint32_t old_wid, uint32_t new_wid);
 void view_stack_window_node(struct window_node *node, struct window *window);
 struct window_node *view_add_window_node_with_insertion_point(struct view *view, struct window *window, uint32_t insertion_point);
 struct window_node *view_add_window_node(struct view *view, struct window *window);
@@ -271,6 +275,7 @@ void view_serialize(FILE *rsp, struct view *view, uint64_t flags);
 bool view_is_invalid(struct view *view);
 bool view_is_dirty(struct view *view);
 void view_flush(struct view *view);
+void view_flush_direct(struct view *view);
 void view_update(struct view *view);
 void view_scroll_by(struct view *view, int columns);
 struct view *view_create(uint64_t sid);

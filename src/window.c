@@ -784,6 +784,39 @@ bool window_can_move(struct window *window)
     return window_check_flag(window, WINDOW_MOVABLE);
 }
 
+int window_ax_tab_count(struct window *window)
+{
+    CFArrayRef children = NULL;
+    AXUIElementCopyAttributeValue(window->ref, kAXChildrenAttribute, (CFTypeRef *) &children);
+    if (!children) return 0;
+
+    int result = 0;
+    int child_count = CFArrayGetCount(children);
+
+    for (int i = 0; i < child_count; ++i) {
+        AXUIElementRef child = CFArrayGetValueAtIndex(children, i);
+
+        CFTypeRef role = NULL;
+        AXUIElementCopyAttributeValue(child, kAXRoleAttribute, &role);
+        if (!role) continue;
+
+        bool is_tab_group = CFEqual(role, CFSTR("AXTabGroup"));
+        CFRelease(role);
+        if (!is_tab_group) continue;
+
+        CFArrayRef tabs = NULL;
+        AXUIElementCopyAttributeValue(child, CFSTR("AXTabs"), (CFTypeRef *) &tabs);
+        if (tabs) {
+            result = CFArrayGetCount(tabs);
+            CFRelease(tabs);
+        }
+        break;
+    }
+
+    CFRelease(children);
+    return result;
+}
+
 bool window_ax_can_resize(struct window *window)
 {
     Boolean result;
@@ -1149,6 +1182,6 @@ void window_destroy(struct window *window)
     if (window->role) CFRelease(window->role);
     if (window->subrole) CFRelease(window->subrole);
     if (window->title) CFRelease(window->title);
-    CFRelease(window->ref);
+    if (window->ref) CFRelease(window->ref);
     free(window);
 }

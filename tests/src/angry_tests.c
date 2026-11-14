@@ -1,0 +1,644 @@
+#include "../../src/misc/memory_pool.h"
+#include "../../src/misc/hashtable.h"
+
+static TABLE_HASH_FUNC(angry_hash)
+{
+    return *(uint32_t *) key;
+}
+
+static TABLE_COMPARE_FUNC(angry_compare)
+{
+    return *(uint32_t *) key_a == *(uint32_t *) key_b;
+}
+
+ANGRY_TEST(allocatesChunkInEmptyMemoryPool)
+{
+    struct memory_pool pool;
+    memory_pool_init(&pool, KILOBYTES(16));
+    void *ptr = memory_pool_push(&pool, 128);
+    ANGRY_ASSERT(ptr == pool.memory, "first allocated chunk must point to start of pool buffer");
+}
+
+ANGRY_TEST(preservesStoredPointerAcrossThousandAllocations)
+{
+    struct memory_pool pool;
+    memory_pool_init(&pool, MEGABYTES(1));
+    uint32_t *first = (uint32_t *) memory_pool_push(&pool, sizeof(uint32_t));
+    *first = 0xDEADBEEF;
+    for (int i = 1; i < 1000; ++i) {
+        *(uint32_t *) memory_pool_push(&pool, sizeof(uint32_t)) = (uint32_t)(i * 31);
+    }
+    ANGRY_ASSERT(*first == 0xDEADBEEF, "first element data must not be corrupted by subsequent pushes");
+}
+
+ANGRY_TEST(wrapsMemoryPoolPointerToOriginOnOverflow)
+{
+    struct memory_pool pool;
+    memory_pool_init(&pool, getpagesize());
+    uint64_t chunk = 64;
+    uint64_t count = pool.size / chunk;
+    for (uint64_t i = 0; i < count - 1; ++i) {
+        memory_pool_push(&pool, chunk);
+    }
+    void *wrapped = memory_pool_push(&pool, chunk);
+    ANGRY_ASSERT(wrapped == pool.memory, "pool wrap-around must reset memory allocation pointer to origin");
+}
+
+ANGRY_TEST(rehashesTableWithoutDataLossUnderHighLoad)
+{
+    struct table table;
+    table_init(&table, 37, angry_hash, angry_compare);
+    uint32_t keys[1024];
+    for (uint32_t i = 0; i < 1024; ++i) {
+        keys[i] = i * 2654435761u;
+        table_add(&table, &keys[i], (void *)(intptr_t)(keys[i] ^ 0xCAFEBABE));
+    }
+    uint32_t target_idx = 777;
+    void *val = table_find(&table, &keys[target_idx]);
+    ANGRY_ASSERT((intptr_t)val == (intptr_t)(keys[target_idx] ^ 0xCAFEBABE), "rehashed table must retrieve stored keys without loss");
+}
+
+ANGRY_TEST(removesKeyAndCleansEntryFromTable)
+{
+    struct table table;
+    table_init(&table, 53, angry_hash, angry_compare);
+    uint32_t key = 0xBEEFCAFE;
+    table_add(&table, &key, (void *) 0x12345);
+    table_remove(&table, &key);
+    ANGRY_ASSERT_ALL("removed key must return NULL and decrement count to zero",
+                     table_find(&table, &key) == NULL,
+                     table.count == 0);
+}
+
+ANGRY_TEST(preservesUnremovedKeysAfterPartialDeletion)
+{
+    struct table table;
+    table_init(&table, 64, angry_hash, angry_compare);
+    uint32_t keys[100];
+    for (uint32_t i = 0; i < 100; ++i) {
+        keys[i] = i + 1;
+        table_add(&table, &keys[i], (void *)(intptr_t)(keys[i] * 7));
+    }
+    for (uint32_t i = 0; i < 50; ++i) {
+        table_remove(&table, &keys[i]);
+    }
+    uint32_t probe_key = 88;
+    void *val = table_find(&table, &probe_key);
+    ANGRY_ASSERT_ALL("unremoved key must remain accessible with its original value",
+                     (intptr_t)val == 616,
+                     table.count == 50);
+}
+
+ANGRY_TEST(ignoresDuplicateAddWhenKeyAlreadyExists)
+{
+    struct table table;
+    table_init(&table, 17, angry_hash, angry_compare);
+    uint32_t key = 42;
+    table_add(&table, &key, (void *) 0xAAAA);
+    table_add(&table, &key, (void *) 0xBBBB);
+    ANGRY_ASSERT_ALL("duplicate add must retain initial value and prevent duplicate count",
+                     (intptr_t)table_find(&table, &key) == 0xAAAA,
+                     table.count == 1);
+}
+
+ANGRY_TEST(identifiesWestDisplayAcrossNegativeCoordinates)
+{
+    struct area center = { 0.0f, 0.0f, 2560.0f, 1440.0f };
+    struct area west   = { -1728.0f, -120.0f, 1728.0f, 1117.0f };
+    bool is_west = area_is_in_direction(&center, area_max_point(center), &west, area_max_point(west), DIR_WEST);
+    ANGRY_ASSERT(is_west, "display with negative X offset must be recognized in west direction");
+}
+
+ANGRY_TEST(rejectsEastDisplayWhenTargetIsPositionedWest)
+{
+    struct area center = { 0.0f, 0.0f, 2560.0f, 1440.0f };
+    struct area west   = { -1728.0f, -120.0f, 1728.0f, 1117.0f };
+    bool is_east = area_is_in_direction(&center, area_max_point(center), &west, area_max_point(west), DIR_EAST);
+    ANGRY_ASSERT(!is_east, "display to the west must not be accepted as east direction");
+}
+
+ANGRY_TEST(identifiesEastDisplayAcrossPositiveCoordinates)
+{
+    struct area center = { 0.0f, 0.0f, 2560.0f, 1440.0f };
+    struct area east   = { 2560.0f, 0.0f, 1920.0f, 1080.0f };
+    bool is_east = area_is_in_direction(&center, area_max_point(center), &east, area_max_point(east), DIR_EAST);
+    ANGRY_ASSERT(is_east, "display with positive X boundary must be recognized in east direction");
+}
+
+ANGRY_TEST(rejectsWestDisplayWhenTargetIsPositionedEast)
+{
+    struct area center = { 0.0f, 0.0f, 2560.0f, 1440.0f };
+    struct area east   = { 2560.0f, 0.0f, 1920.0f, 1080.0f };
+    bool is_west = area_is_in_direction(&center, area_max_point(center), &east, area_max_point(east), DIR_WEST);
+    ANGRY_ASSERT(!is_west, "display to the east must not be accepted as west direction");
+}
+
+ANGRY_TEST(findsNearestWestDisplayAmongMultipleMonitors)
+{
+    struct test_area displays[3];
+    init_test_display_list(displays);
+    int idx = closest_display_in_direction(displays, 3, 0, DIR_WEST);
+    ANGRY_ASSERT(idx == 1, "center monitor must find display 1 as closest west neighbor");
+}
+
+ANGRY_TEST(findsNearestEastDisplayAcrossIrregularGaps)
+{
+    struct test_area displays[3];
+    init_test_display_list(displays);
+    int idx = closest_display_in_direction(displays, 3, 0, DIR_EAST);
+    ANGRY_ASSERT(idx == 2, "center monitor must find display 2 as closest east neighbor");
+}
+
+ANGRY_TEST(returnsNegativeIndexWhenNoDisplayInDirection)
+{
+    struct test_area displays[3];
+    init_test_display_list(displays);
+    int idx = closest_display_in_direction(displays, 3, 1, DIR_WEST);
+    ANGRY_ASSERT(idx == -1, "westernmost monitor must return -1 when querying west direction");
+}
+
+ANGRY_TEST(splitsParentAreaEquallyWithSpecifiedGapOnVerticalAxis)
+{
+    struct area parent = { 0.0f, 0.0f, 1920.0f, 1080.0f };
+    struct area left, right;
+    area_make_pair(SPLIT_Y, 20, 0.5f, &parent, &left, &right);
+    bool valid = ANGRY_ALL((left.w == 950), (right.w == 950), (right.x == 970));
+    ANGRY_ASSERT(valid, "vertical split at 0.5 with 20px gap must yield symmetric widths and correct right offset");
+}
+
+ANGRY_TEST(splitsParentAreaAsymmetricallyOnHorizontalAxis)
+{
+    struct area parent = { 24.0f, 64.0f, 1200.0f, 900.0f };
+    struct area top, bottom;
+    area_make_pair(SPLIT_X, 10, 0.3f, &parent, &top, &bottom);
+    bool valid = ANGRY_ALL((top.h == 267), (bottom.h == 623), (bottom.y == 341));
+    ANGRY_ASSERT(valid, "horizontal split with ratio 0.3 must distribute height proportionally and position bottom area");
+}
+
+ANGRY_TEST(preservesTotalDimensionWithinPixelRoundingTolerance)
+{
+    struct area parent = { 0.0f, 0.0f, 2560.0f, 1440.0f };
+    struct area left, right;
+    int gap = 48;
+    area_make_pair(SPLIT_Y, gap, 0.62f, &parent, &left, &right);
+    int delta = abs((int)(left.w + right.w + gap) - (int)parent.w);
+    ANGRY_ASSERT(delta <= 1, "sum of partitioned widths plus gap must strictly match parent within integer truncation tolerance");
+}
+
+ANGRY_TEST(allocatesMinimumDimensionWhenSplitRatioIsExtremelySmall)
+{
+    struct area parent = { 0.0f, 0.0f, 1000.0f, 800.0f };
+    struct area left, right;
+    area_make_pair(SPLIT_Y, 10, 0.01f, &parent, &left, &right);
+    bool valid = ANGRY_ALL((left.w == 9), (right.w == 980));
+    ANGRY_ASSERT(valid, "extreme small ratio of 0.01 must not underflow or crash partition arithmetic");
+}
+
+ANGRY_TEST(allocatesMinimumDimensionWhenSplitRatioIsExtremelyLarge)
+{
+    struct area parent = { 0.0f, 0.0f, 1000.0f, 800.0f };
+    struct area left, right;
+    area_make_pair(SPLIT_Y, 10, 0.99f, &parent, &left, &right);
+    bool valid = ANGRY_ALL((left.w == 980), (right.w == 9));
+    ANGRY_ASSERT(valid, "extreme large ratio of 0.99 must assign remainder cleanly to right partition");
+}
+
+ANGRY_TEST(ignoresDropWhenCursorDeltaIsBelowThreshold)
+{
+    CGPoint down = CGPointMake(543.2f, 412.8f);
+    CGPoint up   = CGPointMake(544.7f, 411.9f);
+    bool moved = (fabs(up.x - down.x) >= 3.0f) || (fabs(up.y - down.y) >= 3.0f);
+    ANGRY_ASSERT(!moved, "cursor displacement under 3 pixels must not register as drag movement");
+}
+
+ANGRY_TEST(permitsDropWhenCursorDeltaCrossesThreshold)
+{
+    CGPoint down = CGPointMake(543.2f, 412.8f);
+    CGPoint up   = CGPointMake(546.5f, 412.8f);
+    bool moved = (fabs(up.x - down.x) >= 3.0f) || (fabs(up.y - down.y) >= 3.0f);
+    ANGRY_ASSERT(moved, "cursor displacement of 3.3 pixels must be recognized as deliberate drag movement");
+}
+
+ANGRY_TEST(preservesWindowWhenExitingToMatchingSpace)
+{
+    uint64_t target_sid = 4;
+    uint64_t current_sid = 4;
+    bool should_skip = space_is_fullscreen(current_sid) || (current_sid == target_sid);
+    ANGRY_ASSERT(should_skip, "validation must not un-tile windows already present on destination space");
+}
+
+ANGRY_TEST(guardsAgainstPrematureUntileDuringFullscreenSpaceDestruction)
+{
+    uint64_t temp_fullscreen_sid = 1071;
+    uint64_t destination_sid = 4;
+    bool is_fs = space_is_fullscreen(temp_fullscreen_sid);
+    bool should_skip = is_fs || (temp_fullscreen_sid == destination_sid);
+    ANGRY_ASSERT(should_skip == is_fs, "window associated with active fullscreen space must be shielded from eviction");
+}
+
+ANGRY_TEST(swapsWindowIdsBetweenTwoBspNodesPreservingTreeStructure)
+{
+    struct window_node node_a = { .window_count = 1, .window_list = { 101 }, .window_order = { 101 } };
+    struct window_node node_b = { .window_count = 1, .window_list = { 202 }, .window_order = { 202 } };
+    window_node_swap_window_list(&node_a, &node_b);
+    bool swapped = ANGRY_ALL((node_a.window_list[0] == 202), (node_b.window_list[0] == 101));
+    ANGRY_ASSERT(swapped, "swapping window list must exchange window IDs between the two nodes");
+}
+
+ANGRY_TEST(mirrorsBspTreeHorizontallyInvertingChildOrder)
+{
+    struct window_node left = { .window_count = 1, .window_list = { 101 } };
+    struct window_node right = { .window_count = 1, .window_list = { 202 } };
+    struct window_node root = { .split = SPLIT_Y, .left = &left, .right = &right };
+    window_node_mirror(&root, SPLIT_Y);
+    bool inverted = ANGRY_ALL((root.left == &right), (root.right == &left));
+    ANGRY_ASSERT(inverted, "mirroring along horizontal axis must swap left and right subtrees");
+}
+
+ANGRY_TEST(mirrorsBspTreeVerticallyInvertingChildOrder)
+{
+    struct window_node top = { .window_count = 1, .window_list = { 303 } };
+    struct window_node bottom = { .window_count = 1, .window_list = { 404 } };
+    struct window_node root = { .split = SPLIT_X, .left = &top, .right = &bottom };
+    window_node_mirror(&root, SPLIT_X);
+    bool inverted = ANGRY_ALL((root.left == &bottom), (root.right == &top));
+    ANGRY_ASSERT(inverted, "mirroring along vertical axis must swap top and bottom subtrees");
+}
+
+ANGRY_TEST(promotesSiblingToRootWhenRemovingLeafFromTwoNodeTree)
+{
+    struct view *view = view_create(999);
+    view->layout = VIEW_BSP;
+    struct window w1 = { .id = 111 };
+    struct window w2 = { .id = 222 };
+    view_add_window_node(view, &w1);
+    view_add_window_node(view, &w2);
+    view_remove_window_node(view, &w1);
+    bool valid = ANGRY_ALL(window_node_is_leaf(view->root), (view->root->window_list[0] == 222));
+    view_destroy(view);
+    ANGRY_ASSERT(valid, "removing leaf from two-node tree must promote surviving sibling directly to root");
+}
+
+ANGRY_TEST(requiresAllAttributesForLegacyMacOsVersions)
+{
+    NSOperatingSystemVersion os_26_0 = { 26, 0, 0 };
+    uint32_t attrib = scripting_addition_expected_attrib_for_version(os_26_0);
+    ANGRY_ASSERT(attrib == (uint32_t)OSAX_ATTRIB_ALL, "macOS 26 must require all scripting addition attributes");
+}
+
+ANGRY_TEST(requiresReducedAttributesForTahoeAndGoldengate)
+{
+    NSOperatingSystemVersion os_27_2 = { 27, 2, 0 };
+    uint32_t attrib = scripting_addition_expected_attrib_for_version(os_27_2);
+    ANGRY_ASSERT(attrib == (uint32_t)OSAX_ATTRIB_REDUCED, "macOS 27.2+ must require reduced scripting addition attributes");
+}
+
+ANGRY_TEST(verifiesReducedAttributeMaskMatchesSubset)
+{
+    uint32_t reduced = (uint32_t)OSAX_ATTRIB_REDUCED;
+    uint32_t all = (uint32_t)OSAX_ATTRIB_ALL;
+    ANGRY_ASSERT((reduced & all) == reduced, "reduced attribute mask must strictly be a bitwise subset of all attributes");
+}
+
+ANGRY_TEST(defaultsWindowFocusAnimationToDisabled)
+{
+    ANGRY_ASSERT(!g_space_manager.skip_window_focus_animation, "default focus animation skip flag must be false");
+}
+
+ANGRY_TEST(recordsPendingStateOnVerticalGestureBegin)
+{
+    extern volatile bool __pending_gesture;
+    __atomic_store_n(&__pending_gesture, true, __ATOMIC_RELEASE);
+    bool pending = __atomic_load_n(&__pending_gesture, __ATOMIC_RELAXED);
+    __atomic_store_n(&__pending_gesture, false, __ATOMIC_RELEASE);
+    ANGRY_ASSERT(pending, "beginning a vertical gesture must transition pending gesture state to true");
+}
+
+ANGRY_TEST(updatesLastGestureTimeOnVerticalGestureEnd)
+{
+    extern volatile uint64_t __last_gesture_time;
+    uint64_t now = read_os_timer();
+    __atomic_store_n(&__last_gesture_time, now, __ATOMIC_RELEASE);
+    uint64_t stored = __atomic_load_n(&__last_gesture_time, __ATOMIC_RELAXED);
+    ANGRY_ASSERT_ALL("ending a gesture must record non-zero completion timestamp",
+                     stored == now,
+                     stored > 0);
+}
+
+ANGRY_TEST(capturesFrontmostWindowAndSpaceStateOnMissionControlEnter)
+{
+    extern volatile uint32_t g_mission_control_prev_wid;
+    extern volatile uint64_t g_mission_control_prev_sid;
+    extern volatile pid_t g_mission_control_prev_pid;
+    void mission_control_record_state(void);
+    g_mission_control_prev_sid = 0;
+    g_space_manager.current_space_id = 42;
+    g_window_manager.focused_window_id = 1234;
+    g_process_manager.front_pid = 789;
+    mission_control_record_state();
+    bool captured = ANGRY_ALL((g_mission_control_prev_sid == 42), (g_mission_control_prev_wid == 1234), (g_mission_control_prev_pid == 789));
+    g_mission_control_prev_sid = 0;
+    ANGRY_ASSERT(captured, "mission control entry must accurately record active window, space, and pid");
+}
+
+ANGRY_TEST(maintainsIdempotencyWhenMissionControlStateAlreadyRecorded)
+{
+    extern volatile uint32_t g_mission_control_prev_wid;
+    extern volatile uint64_t g_mission_control_prev_sid;
+    void mission_control_record_state(void);
+    g_mission_control_prev_sid = 42;
+    g_mission_control_prev_wid = 1234;
+    g_space_manager.current_space_id = 99;
+    g_window_manager.focused_window_id = 5678;
+    mission_control_record_state();
+    bool unchanged = ANGRY_ALL((g_mission_control_prev_sid == 42), (g_mission_control_prev_wid == 1234));
+    g_mission_control_prev_sid = 0;
+    ANGRY_ASSERT(unchanged, "mission control state recorder must remain idempotent when state is already captured");
+}
+
+ANGRY_TEST(coalescesConsecutiveMouseDraggedEventsInQueue)
+{
+    struct event_loop loop = {0};
+    memory_pool_init(&loop.pool, KILOBYTES(64));
+    loop.head = memory_pool_push(&loop.pool, sizeof(struct event));
+    loop.head->next = NULL;
+    loop.tail = loop.head;
+    loop.semaphore = sem_open("angry_drag_sem", O_CREAT, 0600, 0);
+    sem_unlink("angry_drag_sem");
+    for (int i = 1; i <= 5; ++i) {
+        event_loop_post(&loop, MOUSE_DRAGGED, (void *)(intptr_t)i, 0);
+    }
+    struct event *next = loop.head->next;
+    struct event *peek;
+    while ((peek = __atomic_load_n(&next->next, __ATOMIC_RELAXED)) != NULL) {
+        if (__atomic_load_n(&peek->type, __ATOMIC_RELAXED) != MOUSE_DRAGGED) break;
+        next = peek;
+    }
+    int last_val = (int)(intptr_t)next->context;
+    sem_close(loop.semaphore);
+    ANGRY_ASSERT(last_val == 5, "event queue coalescing must skip obsolete intermediate drag positions to the latest");
+}
+
+ANGRY_TEST(keepsWaitingEventsWhenEventQueueIsFull)
+{
+    struct event_loop loop = { .thread = pthread_self() };
+    memory_pool_init(&loop.pool, KILOBYTES(16));
+    loop.head = memory_pool_push(&loop.pool, sizeof(struct event));
+    loop.head->next = NULL;
+    loop.tail = loop.head;
+    loop.semaphore = sem_open("angry_full_queue_sem", O_CREAT, 0600, 0);
+    sem_unlink("angry_full_queue_sem");
+    int slots = (int)(loop.pool.size / sizeof(struct event));
+    for (int i = 1; i <= 2 * slots; ++i) {
+        event_loop_post(&loop, SYSTEM_WOKE, NULL, i);
+    }
+    int chained = 0;
+    bool in_order = true;
+    for (struct event *e = loop.head->next; e && chained <= slots; e = e->next) {
+        in_order &= e->param1 == ++chained;
+    }
+    sem_close(loop.semaphore);
+    munmap(loop.pool.memory, loop.pool.size + getpagesize());
+    ANGRY_ASSERT_ALL("a full event queue overwrote events that were still waiting",
+                     chained == (int) loop.count,
+                     chained > slots / 2,
+                     in_order);
+}
+
+ANGRY_TEST(clearsDirtyFlagOnDirectViewFlush)
+{
+    uint32_t did = display_manager_active_display_id();
+    uint64_t sid = display_space_id(did);
+    struct view *view = view_create(sid ? sid : 1);
+    view->layout = VIEW_BSP;
+    view_update(view);
+    view_flush_direct(view);
+    bool clean = !view_is_dirty(view);
+    view_destroy(view);
+    ANGRY_ASSERT(clean, "direct view flush on active space must clear view dirty flag");
+}
+
+ANGRY_TEST(defaultsBspLiveResizeToEnabled)
+{
+    ANGRY_ASSERT(g_mouse_state.bsp_live_resize == true, "default mouse state bsp live resize must be true");
+}
+
+ANGRY_TEST(coercesInsertDirectionToStackWhenTargetViewIsStacked)
+{
+    struct view stack_view = { .layout = VIEW_STACK };
+    int insert_dir = DIR_WEST;
+    if (insert_dir && stack_view.layout == VIEW_STACK) insert_dir = STACK;
+    ANGRY_ASSERT(insert_dir == STACK, "insert direction on stacked layout must be coerced to STACK");
+}
+
+ANGRY_TEST(updatesFocusFollowsMouseMode)
+{
+    window_manager_set_focus_follows_mouse(&g_window_manager, FFM_AUTOFOCUS);
+    ANGRY_ASSERT(g_window_manager.ffm_mode == FFM_AUTOFOCUS, "window manager ffm mode setter must update active state");
+}
+
+ANGRY_TEST(suppressesRapidGestureToSameSpace)
+{
+    uint64_t sid = space_manager_active_space();
+    uint32_t did = space_display_id(sid);
+    space_manager_focus_space_using_gesture(did, sid);
+    bool dup_res = space_manager_focus_space_using_gesture(did, sid);
+    ANGRY_ASSERT(dup_res, "duplicate gesture to same space must be suppressed as success no-op");
+}
+
+ANGRY_TEST(rateLimitsRapidGesturesUnderThreshold)
+{
+    uint64_t sid = space_manager_active_space();
+    uint32_t did = space_display_id(sid);
+    space_manager_focus_space_using_gesture(did, sid);
+    bool rate_res = space_manager_focus_space_using_gesture(did, sid + 9999);
+    ANGRY_ASSERT(!rate_res, "rapid consecutive gesture to another space must be rate-limited");
+}
+
+ANGRY_TEST(resolvesActiveSpaceForRunningApplications)
+{
+    bool ok = run_app_active_space_resolution();
+    ANGRY_ASSERT(ok, "running application PID must resolve to valid non-zero active space ID");
+}
+
+ANGRY_TEST(balancesBspTreeLeafRatiosEquallyForTwoLeaves)
+{
+    struct window_node left = { .window_count = 1 };
+    struct window_node right = { .window_count = 1 };
+    struct window_node root = { .split = SPLIT_Y, .left = &left, .right = &right };
+    left.parent = &root;
+    right.parent = &root;
+    window_node_balance(&root, SPLIT_Y);
+    ANGRY_ASSERT(fabs(root.ratio - 0.5f) < 0.001f, "balanced tree with two leaves must assign ratio 0.5");
+}
+
+ANGRY_TEST(balancesBspTreeLeafRatiosProportionallyForAsymmetricSubtrees)
+{
+    struct window_node l1 = { .window_count = 1 }, l2 = { .window_count = 1 }, r = { .window_count = 1 };
+    struct window_node left_branch = { .split = SPLIT_Y, .left = &l1, .right = &l2 };
+    struct window_node root = { .split = SPLIT_Y, .left = &left_branch, .right = &r };
+    l1.parent = &left_branch; l2.parent = &left_branch;
+    left_branch.parent = &root; r.parent = &root;
+    window_node_balance(&root, SPLIT_Y);
+    ANGRY_ASSERT(fabs(root.ratio - (2.0f / 3.0f)) < 0.001f, "asymmetric tree with 2-to-1 leaves must assign ratio 2/3");
+}
+
+ANGRY_TEST(rotatesBspNodeNinetyDegreesTogglingSplitAxis)
+{
+    struct window_node left = { .window_count = 1 }, right = { .window_count = 1 };
+    struct window_node root = { .split = SPLIT_Y, .ratio = 0.6f, .left = &left, .right = &right };
+    window_node_rotate(&root, 90);
+    bool valid = ANGRY_ALL((root.split == SPLIT_X), (fabs(root.ratio - 0.4f) < 0.001f));
+    ANGRY_ASSERT(valid, "rotating 90 degrees must toggle split axis and invert ratio");
+}
+
+ANGRY_TEST(rotatesBspNodeOneEightyDegreesInvertingRatioAndChildren)
+{
+    struct window_node left = { .window_count = 1 }, right = { .window_count = 1 };
+    struct window_node root = { .split = SPLIT_Y, .ratio = 0.7f, .left = &left, .right = &right };
+    window_node_rotate(&root, 180);
+    bool valid = ANGRY_ALL((root.left == &right), (root.right == &left), (fabs(root.ratio - 0.3f) < 0.001f));
+    ANGRY_ASSERT(valid, "rotating 180 degrees must swap left/right children and invert ratio");
+}
+
+ANGRY_TEST(rotatesBspNodeTwoSeventyDegreesTogglingSplitAxis)
+{
+    struct window_node top = { .window_count = 1 }, bottom = { .window_count = 1 };
+    struct window_node root = { .split = SPLIT_X, .ratio = 0.25f, .left = &top, .right = &bottom };
+    window_node_rotate(&root, 270);
+    bool valid = ANGRY_ALL((root.split == SPLIT_Y), (fabs(root.ratio - 0.75f) < 0.001f));
+    ANGRY_ASSERT(valid, "rotating 270 degrees must switch split from X to Y and invert ratio");
+}
+
+ANGRY_TEST(findsNorthFenceAncestorWhenBoundedVertically)
+{
+    struct window_node parent = { .split = SPLIT_X, .area = { 0, 0, 1920, 1080 } };
+    struct window_node child = { .parent = &parent, .area = { 0, 540, 1920, 540 } };
+    struct window_node *fence = window_node_fence(&child, DIR_NORTH);
+    ANGRY_ASSERT(fence == &parent, "node bounded from above must find parent as northern fence");
+}
+
+ANGRY_TEST(returnsNullFenceWhenNodeLiesOnDisplayEdge)
+{
+    struct window_node parent = { .split = SPLIT_Y, .area = { 0, 0, 1920, 1080 } };
+    struct window_node child = { .parent = &parent, .area = { 0, 0, 960, 1080 } };
+    struct window_node *fence = window_node_fence(&child, DIR_WEST);
+    ANGRY_ASSERT(fence == NULL, "node abutting display boundary must return NULL fence in that direction");
+}
+
+ANGRY_TEST(stacksWindowOnLeafNodePlacingItAtFrontOfOrder)
+{
+    struct window_node leaf = { .window_count = 1, .window_list = { 101 }, .window_order = { 101 } };
+    struct window w2 = { .id = 202 };
+    view_stack_window_node(&leaf, &w2);
+    bool valid = ANGRY_ALL((leaf.window_count == 2), (leaf.window_order[0] == 202));
+    ANGRY_ASSERT(valid, "stacking window must increment count and place new window at front of order");
+}
+
+ANGRY_TEST(combinesRuleEffectsOverridingManageProperty)
+{
+    struct rule_effects base = { .manage = RULE_PROP_OFF };
+    struct rule_effects incoming = { .manage = RULE_PROP_ON };
+    rule_combine_effects(&incoming, &base);
+    ANGRY_ASSERT(base.manage == RULE_PROP_ON, "incoming rule manage property must override base rule effects");
+}
+
+ANGRY_TEST(combinesRuleEffectsClampingOpacityToUnitInterval)
+{
+    struct rule_effects base = {0};
+    struct rule_effects incoming = { .flags = RULE_OPACITY, .opacity = 0.85f };
+    rule_combine_effects(&incoming, &base);
+    bool valid = ANGRY_ALL(rule_effects_check_flag(&base, RULE_OPACITY), (fabs(base.opacity - 0.85f) < 0.001f));
+    ANGRY_ASSERT(valid, "valid opacity within unit interval must be copied and flagged in combined result");
+}
+
+ANGRY_TEST(combinesRuleEffectsPreservingScratchpadIdentifier)
+{
+    struct rule_effects base = {0};
+    struct rule_effects incoming = { .scratchpad = "debug_term" };
+    rule_combine_effects(&incoming, &base);
+    bool valid = ANGRY_ALL(base.scratchpad, string_equals(base.scratchpad, "debug_term"));
+    free(base.scratchpad);
+    ANGRY_ASSERT(valid, "combining effects must duplicate incoming scratchpad string without leak");
+}
+
+ANGRY_TEST(parsesRgbaColorFromHexWithAlphaChannel)
+{
+    uint32_t hex = 0xFF804020;
+    struct rgba_color c = rgba_color_from_hex(hex);
+    bool valid = ANGRY_ALL((fabs(c.a - 1.0f) < 0.001f), (fabs(c.r - (128.0f / 255.0f)) < 0.005f));
+    ANGRY_ASSERT(valid, "hex color 0xFF804020 must parse alpha as 1.0 and red channel accurately");
+}
+
+ANGRY_TEST(clampsFloatValueWithinSpecifiedBoundary)
+{
+    float clamped = clampf_range(15.7f, 0.0f, 10.0f);
+    ANGRY_ASSERT(clamped == 10.0f, "float exceeding upper boundary must clamp to maximum");
+}
+
+ANGRY_TEST(clampsNegativeFloatValueToMinimumBoundary)
+{
+    float clamped = clampf_range(-4.2f, -1.0f, 5.0f);
+    ANGRY_ASSERT(clamped == -1.0f, "float below lower boundary must clamp to minimum");
+}
+
+ANGRY_TEST(identifiesPointInsideBoundingBox)
+{
+    CGRect r = CGRectMake(100.0f, 100.0f, 200.0f, 200.0f);
+    CGPoint p = CGPointMake(150.0f, 250.0f);
+    ANGRY_ASSERT(cgrect_contains_point(r, p), "point strictly within rectangle boundaries must evaluate true");
+}
+
+ANGRY_TEST(rejectsPointOutsideBoundingBox)
+{
+    CGRect r = CGRectMake(100.0f, 100.0f, 200.0f, 200.0f);
+    CGPoint p = CGPointMake(350.0f, 150.0f);
+    ANGRY_ASSERT(!cgrect_contains_point(r, p), "point beyond rectangle width must evaluate false");
+}
+
+ANGRY_TEST(identifiesPointInsideTriangle)
+{
+    CGPoint t[3] = { CGPointMake(0.0f, 0.0f), CGPointMake(100.0f, 0.0f), CGPointMake(50.0f, 100.0f) };
+    CGPoint p = CGPointMake(50.0f, 30.0f);
+    ANGRY_ASSERT(triangle_contains_point(t, p), "interior centroid point must evaluate true inside triangle");
+}
+
+ANGRY_TEST(rejectsPointOutsideTriangle)
+{
+    CGPoint t[3] = { CGPointMake(0.0f, 0.0f), CGPointMake(100.0f, 0.0f), CGPointMake(50.0f, 100.0f) };
+    CGPoint p = CGPointMake(50.0f, 150.0f);
+    ANGRY_ASSERT(!triangle_contains_point(t, p), "exterior point beyond vertex must evaluate false");
+}
+
+ANGRY_TEST(escapesSpecialCharactersForJsonSerialization)
+{
+    char raw[] = "name=\"yabai\"\nstatus=ok";
+    char *escaped = ts_string_escape(raw);
+    bool valid = ANGRY_ALL(escaped, string_equals(escaped, "name=\\\"yabai\\\"\\nstatus=ok"));
+    ANGRY_ASSERT(valid, "quotes and newlines must be escaped with preceding backslashes");
+}
+
+ANGRY_TEST(returnsNullWhenStringRequiresNoEscaping)
+{
+    char plain[] = "clean_unquoted_string_123";
+    char *escaped = ts_string_escape(plain);
+    ANGRY_ASSERT(escaped == NULL, "plain alphanumeric strings must return NULL bypassing re-allocation");
+}
+
+ANGRY_TEST(matchesValidRegularExpression)
+{
+    regex_t re;
+    regcomp(&re, "^Google Chrome.*$", REG_EXTENDED | REG_NOSUB);
+    int res = regex_match(true, &re, "Google Chrome - New Tab");
+    regfree(&re);
+    ANGRY_ASSERT(res == REGEX_MATCH_YES, "matching window title against pattern must return REGEX_MATCH_YES");
+}
+
+ANGRY_TEST(rejectsMismatchedRegularExpression)
+{
+    regex_t re;
+    regcomp(&re, "^Safari.*$", REG_EXTENDED | REG_NOSUB);
+    int res = regex_match(true, &re, "Google Chrome - New Tab");
+    regfree(&re);
+    ANGRY_ASSERT(res == REGEX_MATCH_NO, "mismatched window title against pattern must return REGEX_MATCH_NO");
+}

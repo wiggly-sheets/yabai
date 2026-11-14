@@ -28,12 +28,27 @@ static MOUSE_HANDLER(mouse_handler)
         CFMachPortRef handle = __atomic_load_n(&mouse_state->handle, __ATOMIC_RELAXED);
         if (handle) CGEventTapEnable(handle, true);
     } break;
-    case kCGEventLeftMouseDown:
+    case kCGEventLeftMouseDown: {
+        extern volatile bool g_mission_control_mouse_clicked;
+        if (mission_control_is_active()) {
+            __atomic_store_n(&g_mission_control_mouse_clicked, true, __ATOMIC_RELEASE);
+        }
+        uint8_t mod = mouse_mod_from_cgflags(CGEventGetFlags(event));
+        event_loop_post(&g_event_loop, MOUSE_DOWN, (void *) CFRetain(event), mod);
+
+        if (mod == mouse_state->modifier) {
+            if (mouse_state->consume_mouse_click) CFRelease(mouse_state->consumed_event);
+            mouse_state->consume_mouse_click = true;
+            mouse_state->consumed_event = (CGEventRef) CFRetain(event);
+            return NULL;
+        }
+    } break;
     case kCGEventRightMouseDown: {
         uint8_t mod = mouse_mod_from_cgflags(CGEventGetFlags(event));
         event_loop_post(&g_event_loop, MOUSE_DOWN, (void *) CFRetain(event), mod);
 
         if (mod == mouse_state->modifier) {
+            if (mouse_state->consume_mouse_click) CFRelease(mouse_state->consumed_event);
             mouse_state->consume_mouse_click = true;
             mouse_state->consumed_event = (CGEventRef) CFRetain(event);
             return NULL;
@@ -43,7 +58,12 @@ static MOUSE_HANDLER(mouse_handler)
     case kCGEventRightMouseUp: {
         event_loop_post(&g_event_loop, MOUSE_UP, (void *) CFRetain(event), 0);
 
-        if (mouse_state->consume_mouse_click) {
+        //
+        // NOTE: a second consumed mouse down replaces the first, so only the up of
+        // the same button ends the consumed click and is posted with its down.
+        //
+
+        if (mouse_state->consume_mouse_click && CGEventGetType(mouse_state->consumed_event) + 1 == type) {
             if (!mouse_state->drag_detected) {
                 CGEventTapPostEvent(proxy, mouse_state->consumed_event);
                 CGEventTapPostEvent(proxy, event);
@@ -70,13 +90,24 @@ static MOUSE_HANDLER(mouse_handler)
         int type = CGEventGetIntegerValueField(event, /* kCGEventGestureHIDType */ 110);
         if (type == /* kIOHIDEventTypeDockSwipe */ 23) {
             int motion = CGEventGetIntegerValueField(event, /* kCGEventGestureSwipeMotion */ 123);
-            if (motion == /* kCGGestureMotionHorizontal */ 1) {
+            if (motion == /* kCGGestureMotionHorizontal */ 1 || motion == /* kCGGestureMotionVertical */ 2) {
                 int phase = CGEventGetIntegerValueField(event, /* kCGEventGesturePhase */ 132);
                 if (phase == /* kCGSGesturePhaseBegan */ 1) {
                     __atomic_store_n(&__pending_gesture, true, __ATOMIC_RELEASE);
+                    if (motion == /* kCGGestureMotionVertical */ 2) {
+                        mission_control_record_state_from_event_tap();
+                    }
                 } else if (phase == /* kCGSGesturePhaseEnded */ 4 || phase == /* kCGSGesturePhaseCancelled */ 8) {
                     __atomic_store_n(&__pending_gesture, false, __ATOMIC_RELEASE);
                     __atomic_store_n(&__last_gesture_time, read_os_timer(), __ATOMIC_RELEASE);
+                    if (motion == /* kCGGestureMotionVertical */ 2) {
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.2f * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                            event_loop_post(&g_event_loop, MISSION_CONTROL_CHECK_FOR_EXIT, NULL, 0);
+                        });
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5f * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                            event_loop_post(&g_event_loop, MISSION_CONTROL_CHECK_FOR_EXIT, NULL, 0);
+                        });
+                    }
                 }
             }
         }
@@ -103,6 +134,16 @@ void mouse_window_info_populate(struct mouse_state *ms, struct mouse_window_info
 
     info->changed_position = info->changed_x || info->changed_y;
     info->changed_size     = info->changed_w || info->changed_h;
+}
+
+bool mouse_gesture_moved(struct mouse_state *ms, CGPoint point)
+{
+    // down_location follows the cursor during a resize, so it can't tell a click from a drag.
+    if (ms->resize_applied) return true;
+
+    double dx = fabs(point.x - ms->origin_location.x);
+    double dy = fabs(point.y - ms->origin_location.y);
+    return dx >= 3.0f || dy >= 3.0f;
 }
 
 enum mouse_drop_action mouse_determine_drop_action(struct mouse_state *ms, struct window_node *src_node, struct window *dst_window, CGPoint point)
@@ -132,11 +173,27 @@ enum mouse_drop_action mouse_determine_drop_action(struct mouse_state *ms, struc
 
 void mouse_drop_action_stack(struct window_manager *wm, struct view *src_view, struct window *src_window, struct view *dst_view, struct window *dst_window)
 {
+    //
+    // NOTE: a full stack leaves the dragged window in its own node, put back where
+    // it was. Untiling the window can free and merge nodes, so look up dst_node
+    // again after.
+    //
+
+    struct window_node *dst_node = view_find_window_node(dst_view, dst_window->id);
+    if (!dst_node) return;
+
+    int stack_count = dst_node->window_count - window_node_contains_window(dst_node, src_window->id);
+    if (stack_count >= NODE_MAX_WINDOW_COUNT) {
+        struct window_node *src_node = view_find_window_node(src_view, src_window->id);
+        if (src_node) window_node_flush(src_node);
+        return;
+    }
+
     space_manager_untile_window(src_view, src_window);
     window_manager_remove_managed_window(wm, src_window->id);
 
-    struct window_node *dst_node = view_find_window_node(dst_view, dst_window->id);
-    if (dst_node->window_count+1 < NODE_MAX_WINDOW_COUNT) {
+    dst_node = view_find_window_node(dst_view, dst_window->id);
+    if (dst_node) {
         view_stack_window_node(dst_node, src_window);
         window_manager_add_managed_window(wm, src_window, dst_view);
         window_manager_adjust_layer(src_window, LAYER_BELOW);
@@ -214,7 +271,7 @@ void mouse_drop_action_warp(struct window_manager *wm, struct view *src_view, st
         window_node_capture_windows(src_node_rm, &window_list);
     }
 
-    if (!src_node_rm || (src_node_rm != src_node_add && src_node_rm != src_node_add->parent)) {
+    if (src_node_add && (!src_node_rm || (src_node_rm != src_node_add && src_node_rm != src_node_add->parent))) {
         window_node_capture_windows(src_node_add, &window_list);
     }
 
@@ -271,10 +328,11 @@ end:
 
 void mouse_state_init(struct mouse_state *state)
 {
-    state->modifier    = MOUSE_MOD_FN;
-    state->action1     = MOUSE_MODE_MOVE;
-    state->action2     = MOUSE_MODE_RESIZE;
-    state->drop_action = MOUSE_MODE_SWAP;
+    state->modifier        = MOUSE_MOD_FN;
+    state->action1         = MOUSE_MODE_MOVE;
+    state->action2         = MOUSE_MODE_RESIZE;
+    state->drop_action     = MOUSE_MODE_SWAP;
+    state->bsp_live_resize = true;
 }
 
 bool mouse_handler_begin(struct mouse_state *mouse_state, uint32_t mask)

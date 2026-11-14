@@ -82,6 +82,7 @@ static bool process_is_being_debugged(pid_t pid)
 uint64_t process_manager_active_space_for_psn(int connection)
 {
     uint64_t sid = 0;
+    if (connection <= 0) return sid;
 
     int display_count;
     uint32_t *display_list = display_manager_active_display_list(&display_count);
@@ -107,7 +108,7 @@ uint64_t process_manager_active_space_for_psn(int connection)
 
     uint64_t set_tags = 0;
     uint64_t clear_tags = 0;
-    uint32_t options = 0x2;
+    uint32_t options = 0x7;
 
     CFArrayRef space_list_ref = cfarray_of_cfnumbers(space_list, sizeof(uint64_t), space_count, kCFNumberSInt64Type);
     CFArrayRef window_list_ref = SLSCopyWindowsWithOptionsAndTags(g_connection, connection, space_list_ref, options, &set_tags, &clear_tags);
@@ -117,7 +118,13 @@ uint64_t process_manager_active_space_for_psn(int connection)
     if (!count) goto out;
 
     CFTypeRef query = SLSWindowQueryWindows(g_connection, window_list_ref, count);
+    if (!query) goto out;
+
     CFTypeRef iterator = SLSWindowQueryResultCopyWindows(query);
+    if (!iterator) {
+        CFRelease(query);
+        goto out;
+    }
 
     while (SLSWindowIteratorAdvance(iterator)) {
         uint64_t tags = SLSWindowIteratorGetTags(iterator);
@@ -128,9 +135,17 @@ uint64_t process_manager_active_space_for_psn(int connection)
 
         if (parent_wid == 0) {
             if (level == 0 || level == 3 || level == 8) {
-                if (((attributes & 0x2) || (tags & 0x400000000000000)) && (((tags & 0x1)) || ((tags & 0x2) && (tags & 0x80000000)))) {
-                    sid = window_space(wid);
-                    break;
+                struct window *window = window_manager_find_window(&g_window_manager, wid);
+                if (window) {
+                    if (!window_check_flag(window, WINDOW_STICKY) && !window_is_sticky(wid)) {
+                        sid = window_space(wid);
+                        if (sid) break;
+                    }
+                } else if (((attributes & 0x3) || (tags & 0x400000000000000)) && (((tags & 0x1)) || ((tags & 0x2) && (tags & 0x80000000)))) {
+                    if (!window_is_sticky(wid)) {
+                        sid = window_space(wid);
+                        if (sid) break;
+                    }
                 }
             }
         }
@@ -195,7 +210,21 @@ static PROCESS_EVENT_HANDLER(process_handler)
     } break;
     case kEventAppFrontSwitched: {
         struct process *process = process_manager_find_process(pm, &psn);
-        if (!process) return noErr;
+        if (!process) {
+            //
+            // NOTE: A process running under a debugger is not tracked, as an accessibility request to one that is
+            // stopped at a breakpoint would block yabai. Activating it should still bring the user to its space,
+            // and that only takes WindowServer, which answers for the process whether it is stopped or not.
+            //
+
+            pid_t pid = process_pid_for_psn(psn);
+            if (process_is_being_debugged(pid)) {
+                int connection = 0;
+                SLSGetConnectionIDForPSN(g_connection, &psn, &connection);
+                event_loop_post(&g_event_loop, DEBUGGED_APPLICATION_FRONT_SWITCHED, (void *)(intptr_t) pid, connection);
+            }
+            return noErr;
+        }
 
         event_loop_post(&g_event_loop, APPLICATION_FRONT_SWITCHED, process, 0);
     } break;

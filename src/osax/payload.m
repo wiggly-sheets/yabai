@@ -39,6 +39,12 @@
 
 #define page_align(addr) (vm_address_t)((uintptr_t)(addr) & (~(vm_page_size - 1)))
 #define unpack(v) memcpy(&v, message, sizeof(v)); message += sizeof(v)
+
+//
+// NOTE: a list message carries its own count. Read the entries of a list only as
+// far as the bytes actually received go, whatever that count says.
+//
+#define has_bytes(n) ((size_t)(end - message) >= (size_t)(n))
 #define lerp(a, t, b) (((1.0-t)*a) + (t*b))
 
 extern int SLSMainConnectionID(void);
@@ -62,6 +68,8 @@ extern CFStringRef SLSCopyManagedDisplayForSpace(int cid, uint64_t sid);
 extern void SLSMoveWindowsToManagedSpace(int cid, CFArrayRef window_list, uint64_t sid);
 extern void SLSShowSpaces(int cid, CFArrayRef space_list);
 extern void SLSHideSpaces(int cid, CFArrayRef space_list);
+extern CFArrayRef SLSCopyManagedDisplaySpaces(int cid);
+extern CGError SLSMoveManagedSpaceToDisplayIndex(int cid, uint64_t sid, CFStringRef display_ref, int index);
 extern CFTypeRef SLSTransactionCreate(int cid);
 extern CGError SLSTransactionCommit(CFTypeRef transaction, int synchronous);
 extern CGError SLSTransactionOrderWindowGroup(CFTypeRef transaction, uint32_t wid, int order, uint32_t rel_wid);
@@ -87,6 +95,7 @@ static uint64_t remove_space_fp;
 static uint64_t move_space_fp;
 static uint64_t set_front_window_fp;
 static uint64_t animation_time_addr;
+static bool sls_space_move;
 static bool macOSSequoia;
 
 static pthread_t daemon_thread;
@@ -387,6 +396,15 @@ static void init_instances()
 #endif
     }
 
+    //
+    // NOTE: macOS 27.2 no longer has the Dock function (and desktop picture manager) we used to move spaces.
+    // The Dock keeps its own space list in sync with the WindowServer, so we can move the space there directly.
+    //
+
+    bool is_macos_27_2 = os_version.majorVersion > 27 || (os_version.majorVersion == 27 && os_version.minorVersion >= 2);
+    sls_space_move = is_macos_27_2 && dock_spaces != nil && move_space_fp == 0;
+    if (sls_space_move) NSLog(@"[yabai-sa] moving spaces through the WindowServer..");
+
     animation_time_addr = hex_find_seq(baseaddr + get_fix_animation_offset(os_version), get_fix_animation_pattern(os_version));
     if (animation_time_addr == 0x0) {
         NSLog(@"[yabai-sa] failed to get pointer to animation-time..");
@@ -424,6 +442,7 @@ static inline uint64_t get_space_id(id space)
 
 static inline id space_for_display_with_id(CFStringRef display_uuid, uint64_t space_id)
 {
+    if (!display_uuid) return nil;
     NSArray *spaces_for_display = ((NSArray *(*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(spacesForDisplay:), display_uuid);
     for (id space in spaces_for_display) {
         if (space_id == get_space_id(space)) {
@@ -442,8 +461,30 @@ static inline id get_current_space_for_display_space(id display_space)
     return space;
 }
 
+static inline id current_space_for_display(CFStringRef display_uuid, uint64_t space_id)
+{
+    SEL selector = macOSSequoia ? @selector(currentSpaceForDisplayUUID:) : @selector(currentSpaceforDisplayUUID:);
+    if ([dock_spaces respondsToSelector:selector]) {
+        return ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, selector, display_uuid);
+    }
+
+    //
+    // NOTE: macOS 27.2 replaced currentSpaceForDisplayUUID: with currentSpaceForDisplay:,
+    // which takes a CGDirectDisplayID instead of the display uuid string.
+    //
+
+    if ([dock_spaces respondsToSelector:@selector(displayForSPID:)] &&
+        [dock_spaces respondsToSelector:@selector(currentSpaceForDisplay:)]) {
+        uint32_t display_id = ((uint32_t (*)(id, SEL, uint64_t)) objc_msgSend)(dock_spaces, @selector(displayForSPID:), space_id);
+        return ((id (*)(id, SEL, uint32_t)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplay:), display_id);
+    }
+
+    return nil;
+}
+
 static inline id display_space_for_display_uuid(CFStringRef display_uuid)
 {
+    if (!display_uuid) return nil;
     NSArray *display_spaces = get_ivar_value(dock_spaces, "_displaySpaces");
     if (display_spaces != nil) {
         for (id display_space in display_spaces) {
@@ -482,9 +523,54 @@ static inline id display_space_for_space_with_id(uint64_t space_id)
 }
 
 
+static int managed_space_index(CFArrayRef display_spaces_ref, CFStringRef display_uuid, uint64_t sid)
+{
+    int display_spaces_count = CFArrayGetCount(display_spaces_ref);
+    for (int i = 0; i < display_spaces_count; ++i) {
+        CFDictionaryRef display_ref = CFArrayGetValueAtIndex(display_spaces_ref, i);
+        CFStringRef identifier = CFDictionaryGetValue(display_ref, CFSTR("Display Identifier"));
+        if (!identifier || !CFEqual(identifier, display_uuid)) continue;
+
+        CFArrayRef spaces_ref = CFDictionaryGetValue(display_ref, CFSTR("Spaces"));
+        int spaces_count = CFArrayGetCount(spaces_ref);
+        for (int j = 0; j < spaces_count; ++j) {
+            CFDictionaryRef space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
+            CFNumberRef sid_ref = CFDictionaryGetValue(space_ref, CFSTR("ManagedSpaceID"));
+            if (!sid_ref) sid_ref = CFDictionaryGetValue(space_ref, CFSTR("id64"));
+            if (!sid_ref) continue;
+
+            uint64_t result = 0;
+            CFNumberGetValue(sid_ref, CFNumberGetType(sid_ref), &result);
+            if (result == sid) return j;
+        }
+    }
+
+    return -1;
+}
+
+static bool sls_move_space_after_space(uint64_t source_space_id, uint64_t dest_space_id, CFStringRef dest_display_uuid)
+{
+    CFArrayRef display_spaces_ref = SLSCopyManagedDisplaySpaces(SLSMainConnectionID());
+    if (!display_spaces_ref) return false;
+
+    int dest_index = managed_space_index(display_spaces_ref, dest_display_uuid, dest_space_id);
+    int source_index = managed_space_index(display_spaces_ref, dest_display_uuid, source_space_id);
+    CFRelease(display_spaces_ref);
+    if (dest_index == -1) return false;
+
+    //
+    // NOTE: The index is the final position of the space on the destination display.
+    // Removing a space that sits before the destination shifts the destination down by one.
+    //
+
+    int index = (source_index != -1 && source_index < dest_index) ? dest_index : dest_index + 1;
+    return SLSMoveManagedSpaceToDisplayIndex(SLSMainConnectionID(), source_space_id, dest_display_uuid, index) == kCGErrorSuccess;
+}
+
 static void do_space_move(char *message)
 {
-    if (dock_spaces == nil || dp_desktop_picture_manager == nil || move_space_fp == 0) return;
+    if (dock_spaces == nil) return;
+    if (!sls_space_move && (dp_desktop_picture_manager == nil || move_space_fp == 0)) return;
 
     uint64_t source_space_id, dest_space_id, source_prev_space_id;
     unpack(source_space_id);
@@ -495,10 +581,17 @@ static void do_space_move(char *message)
     unpack(focus_dest_space);
 
     CFStringRef source_display_uuid = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), source_space_id);
+    if (!source_display_uuid) return;
+
+    CFStringRef dest_display_uuid = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), dest_space_id);
+    if (!dest_display_uuid) {
+        CFRelease(source_display_uuid);
+        return;
+    }
+
     id source_space = space_for_display_with_id(source_display_uuid, source_space_id);
     id source_display_space = display_space_for_display_uuid(source_display_uuid);
 
-    CFStringRef dest_display_uuid = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), dest_space_id);
     id dest_space = space_for_display_with_id(dest_display_uuid, dest_space_id);
     unsigned dest_display_id = ((unsigned (*)(id, SEL, id)) objc_msgSend)(dock_spaces, @selector(displayIDForSpace:), dest_space);
     id dest_display_space = display_space_for_display_uuid(dest_display_uuid);
@@ -515,11 +608,15 @@ static void do_space_move(char *message)
         [ns_source_space release];
     }
 
-    asm__call_move_space(source_space, dest_space, dest_display_uuid, dock_spaces, move_space_fp);
+    if (sls_space_move) {
+        sls_move_space_after_space(source_space_id, dest_space_id, dest_display_uuid);
+    } else {
+        asm__call_move_space(source_space, dest_space, dest_display_uuid, dock_spaces, move_space_fp);
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        ((void (*)(id, SEL, id, unsigned, CFStringRef)) objc_msgSend)(dp_desktop_picture_manager, @selector(moveSpace:toDisplay:displayUUID:), source_space, dest_display_id, dest_display_uuid);
-    });
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            ((void (*)(id, SEL, id, unsigned, CFStringRef)) objc_msgSend)(dp_desktop_picture_manager, @selector(moveSpace:toDisplay:displayUUID:), source_space, dest_display_id, dest_display_uuid);
+        });
+    }
 
     if (focus_dest_space) {
         uint64_t new_source_space_id = SLSManagedDisplayGetCurrentSpace(SLSMainConnectionID(), source_display_uuid);
@@ -546,10 +643,17 @@ static void do_space_destroy(char *message)
     unpack(space_id);
 
     CFStringRef display_uuid = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), space_id);
+    if (!display_uuid) return;
+
     uint64_t active_space_id = SLSManagedDisplayGetCurrentSpace(SLSMainConnectionID(), display_uuid);
 
     id space = space_for_display_with_id(display_uuid, space_id);
     id display_space = display_space_for_display_uuid(display_uuid);
+
+    if (space == nil || display_space == nil) {
+        CFRelease(display_uuid);
+        return;
+    }
 
     dispatch_sync(dispatch_get_main_queue(), ^{
         ((remove_space_call) remove_space_fp)(space, display_space, dock_spaces, space_id, space_id);
@@ -572,14 +676,18 @@ static void do_space_create(char *message)
     unpack(space_id);
 
     CFStringRef __block display_uuid = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), space_id);
+    if (!display_uuid) return;
+
     dispatch_sync(dispatch_get_main_queue(), ^{
-        Class space_class = objc_getClass("ManagedSpace");
-        if (space_class == nil) {
-            space_class = objc_getClass("Dock.ManagedSpace");
-        }
-        id new_space = [[space_class alloc] init];
         id display_space = display_space_for_display_uuid(display_uuid);
-        asm__call_add_space(new_space, display_space, add_space_fp);
+        if (display_space != nil) {
+            Class space_class = objc_getClass("ManagedSpace");
+            if (space_class == nil) {
+                space_class = objc_getClass("Dock.ManagedSpace");
+            }
+            id new_space = [[space_class alloc] init];
+            asm__call_add_space(new_space, display_space, add_space_fp);
+        }
         CFRelease(display_uuid);
     });
 }
@@ -593,16 +701,9 @@ static void do_space_focus(char *message)
 
     if (dest_space_id) {
         CFStringRef dest_display = SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), dest_space_id);
-        id source_space;
-        if (macOSSequoia && ![dock_spaces respondsToSelector:@selector(currentSpaceForDisplayUUID:)]) {
-            // NOTE: macOS 27.2 replaced currentSpaceForDisplayUUID: with currentSpaceForDisplay:, which takes a CGDirectDisplayID.
-            unsigned dest_display_id = ((unsigned (*)(id, SEL, uint64_t)) objc_msgSend)(dock_spaces, @selector(displayForSPID:), dest_space_id);
-            source_space = ((id (*)(id, SEL, unsigned)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplay:), dest_display_id);
-        } else {
-            source_space = macOSSequoia
-                         ? ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceForDisplayUUID:), dest_display)
-                         : ((id (*)(id, SEL, CFStringRef)) objc_msgSend)(dock_spaces, @selector(currentSpaceforDisplayUUID:), dest_display);
-        }
+        if (!dest_display) return;
+
+        id source_space = current_space_for_display(dest_display, dest_space_id);
         uint64_t source_space_id = get_space_id(source_space);
         if (source_space_id == 0) {
             source_space_id = SLSManagedDisplayGetCurrentSpace(SLSMainConnectionID(), dest_display);
@@ -858,19 +959,22 @@ static void do_window_focus(char *message)
     CFRelease(options);
 }
 
-static void do_window_swap_proxy_in(char *message)
+static void do_window_swap_proxy_in(char *message, char *end)
 {
     int count = 0;
+    if (!has_bytes(sizeof(count))) return;
     unpack(count);
     if (!count) return;
 
     CFTypeRef transaction = SLSTransactionCreate(SLSMainConnectionID());
     for (int i = 0; i < count; ++i) {
         uint32_t wid;
+        if (!has_bytes(sizeof(wid))) break;
         unpack(wid);
         if (!wid) continue;
 
         uint32_t proxy_wid;
+        if (!has_bytes(sizeof(proxy_wid))) break;
         unpack(proxy_wid);
 
         SLSTransactionOrderWindowGroup(transaction, proxy_wid, 1, wid);
@@ -880,19 +984,22 @@ static void do_window_swap_proxy_in(char *message)
     CFRelease(transaction);
 }
 
-static void do_window_swap_proxy_out(char *message)
+static void do_window_swap_proxy_out(char *message, char *end)
 {
     int count = 0;
+    if (!has_bytes(sizeof(count))) return;
     unpack(count);
     if (!count) return;
 
     CFTypeRef transaction = SLSTransactionCreate(SLSMainConnectionID());
     for (int i = 0; i < count; ++i) {
         uint32_t wid;
+        if (!has_bytes(sizeof(wid))) break;
         unpack(wid);
         if (!wid) continue;
 
         uint32_t proxy_wid;
+        if (!has_bytes(sizeof(proxy_wid))) break;
         unpack(proxy_wid);
 
         SLSTransactionSetWindowSystemAlpha(transaction, wid, 1.0f);
@@ -917,15 +1024,17 @@ static void do_window_order(char *message)
     SLSOrderWindow(SLSMainConnectionID(), a_wid, order, b_wid);
 }
 
-static void do_window_order_in(char *message)
+static void do_window_order_in(char *message, char *end)
 {
     int count = 0;
+    if (!has_bytes(sizeof(count))) return;
     unpack(count);
     if (!count) return;
 
     CFTypeRef transaction = SLSTransactionCreate(SLSMainConnectionID());
     for (int i = 0; i < count; ++i) {
         uint32_t wid;
+        if (!has_bytes(sizeof(wid))) break;
         unpack(wid);
         if (!wid) continue;
 
@@ -952,13 +1061,15 @@ static inline CFArrayRef cfarray_of_cfnumbers(void *values, size_t size, int cou
     return result;
 }
 
-static void do_window_list_move_to_space(char *message)
+static void do_window_list_move_to_space(char *message, char *end)
 {
     uint64_t sid;
-    unpack(sid);
-
     int count = 0;
+    if (!has_bytes(sizeof(sid) + sizeof(count))) return;
+
+    unpack(sid);
     unpack(count);
+    if (count <= 0 || !has_bytes((size_t) count * sizeof(uint32_t))) return;
 
     CFArrayRef window_list_ref = cfarray_of_cfnumbers((uint32_t*)message, sizeof(uint32_t), count, kCFNumberSInt32Type);
     SLSMoveWindowsToManagedSpace(SLSMainConnectionID(), window_list_ref, sid);
@@ -986,7 +1097,7 @@ static void do_handshake(int sockfd)
     if (dp_desktop_picture_manager != nil) attrib |= OSAX_ATTRIB_DPPM;
     if (add_space_fp)                      attrib |= OSAX_ATTRIB_ADD_SPACE;
     if (remove_space_fp)                   attrib |= OSAX_ATTRIB_REM_SPACE;
-    if (move_space_fp)                     attrib |= OSAX_ATTRIB_MOV_SPACE;
+    if ((move_space_fp && dp_desktop_picture_manager != nil) || sls_space_move) attrib |= OSAX_ATTRIB_MOV_SPACE;
     if (set_front_window_fp)               attrib |= OSAX_ATTRIB_SET_WINDOW;
     if (animation_time_addr)               attrib |= OSAX_ATTRIB_ANIM_TIME;
 
@@ -1003,8 +1114,9 @@ static void do_handshake(int sockfd)
     send(sockfd, bytes, bytes_length+1, 0);
 }
 
-static void handle_message(int sockfd, char *message)
+static void handle_message(int sockfd, char *message, int length)
 {
+    char *end = message + length;
     enum sa_opcode op = *message++;
     switch (op) {
     case SA_OPCODE_HANDSHAKE: {
@@ -1047,19 +1159,19 @@ static void handle_message(int sockfd, char *message)
         do_window_scale(message);
     } break;
     case SA_OPCODE_WINDOW_SWAP_PROXY_IN: {
-        do_window_swap_proxy_in(message);
+        do_window_swap_proxy_in(message, end);
     } break;
     case SA_OPCODE_WINDOW_SWAP_PROXY_OUT: {
-        do_window_swap_proxy_out(message);
+        do_window_swap_proxy_out(message, end);
     } break;
     case SA_OPCODE_WINDOW_ORDER: {
         do_window_order(message);
     } break;
     case SA_OPCODE_WINDOW_ORDER_IN: {
-        do_window_order_in(message);
+        do_window_order_in(message, end);
     } break;
     case SA_OPCODE_WINDOW_LIST_TO_SPACE: {
-        do_window_list_move_to_space(message);
+        do_window_list_move_to_space(message, end);
     } break;
     case SA_OPCODE_WINDOW_TO_SPACE: {
         do_window_move_to_space(message);
@@ -1067,7 +1179,7 @@ static void handle_message(int sockfd, char *message)
     }
 }
 
-static inline bool read_message(int sockfd, char *message)
+static inline int read_message(int sockfd, char *message)
 {
     int bytes_read    = 0;
     int bytes_to_read = 0;
@@ -1083,10 +1195,10 @@ static inline bool read_message(int sockfd, char *message)
             bytes_read += cur_read;
         } while (bytes_read < bytes_to_read);
 
-        return bytes_read == bytes_to_read;
+        return bytes_read == bytes_to_read ? bytes_read : 0;
     }
 
-    return false;
+    return 0;
 }
 
 static void *handle_connection(void *unused)
@@ -1096,8 +1208,9 @@ static void *handle_connection(void *unused)
         if (sockfd == -1) continue;
 
         char message[SA_SOCKET_BUFF_LEN];
-        if (read_message(sockfd, message)) {
-            handle_message(sockfd, message);
+        int length = read_message(sockfd, message);
+        if (length > 0) {
+            handle_message(sockfd, message, length);
         }
 
         shutdown(sockfd, SHUT_RDWR);

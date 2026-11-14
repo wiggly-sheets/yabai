@@ -7,17 +7,22 @@
     EVENT_TYPE_ENTRY(APPLICATION_LAUNCHED) \
     EVENT_TYPE_ENTRY(APPLICATION_TERMINATED) \
     EVENT_TYPE_ENTRY(APPLICATION_FRONT_SWITCHED) \
+    EVENT_TYPE_ENTRY(DEBUGGED_APPLICATION_FRONT_SWITCHED) \
     EVENT_TYPE_ENTRY(APPLICATION_VISIBLE) \
     EVENT_TYPE_ENTRY(APPLICATION_HIDDEN) \
     EVENT_TYPE_ENTRY(WINDOW_CREATED) \
     EVENT_TYPE_ENTRY(WINDOW_DESTROYED) \
     EVENT_TYPE_ENTRY(WINDOW_FOCUSED) \
+    EVENT_TYPE_ENTRY(TABBED_WINDOW_FOCUSED) \
     EVENT_TYPE_ENTRY(WINDOW_MOVED) \
     EVENT_TYPE_ENTRY(WINDOW_RESIZED) \
     EVENT_TYPE_ENTRY(WINDOW_MINIMIZED) \
     EVENT_TYPE_ENTRY(WINDOW_DEMINIMIZED) \
     EVENT_TYPE_ENTRY(WINDOW_TITLE_CHANGED) \
     EVENT_TYPE_ENTRY(SLS_WINDOW_ORDERED) \
+    EVENT_TYPE_ENTRY(SLS_WINDOW_VISIBLE) \
+    EVENT_TYPE_ENTRY(SLS_ADDED_TO_SPACE) \
+    EVENT_TYPE_ENTRY(SLS_REMOVED_FROM_SPACE) \
     EVENT_TYPE_ENTRY(SLS_WINDOW_DESTROYED) \
     EVENT_TYPE_ENTRY(SLS_SPACE_CREATED) \
     EVENT_TYPE_ENTRY(SLS_SPACE_DESTROYED) \
@@ -68,11 +73,13 @@ struct event_loop
     struct memory_pool pool;
     struct event *head;
     struct event *tail;
+    volatile uint64_t count;
 };
 
 bool event_loop_begin(struct event_loop *event_loop);
 void event_loop_post(struct event_loop *event_loop, enum event_type type, void *context, int param1);
 void update_window_notifications(void);
+void event_loop_reset_open_menus(void);
 
 #endif
 

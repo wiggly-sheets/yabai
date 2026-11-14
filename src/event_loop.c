@@ -12,6 +12,8 @@ volatile bool __pending_window_focus;
 volatile bool __pending_gesture;
 volatile uint64_t __last_gesture_time;
 volatile uint64_t __last_cmd_tab_time;
+volatile uint64_t __last_space_change_time;
+volatile uint64_t __last_empty_space_focus_time;
 
 #define EDGE_RESIZE_THRESHOLD 12.0f
 
@@ -42,10 +44,56 @@ void update_window_notifications(void)
     free(window_list);
 }
 
+static enum ffm_mode ffm_value;
+static int open_menus;
+
+//
+// NOTE: Menus are counted per application, because an application that terminates
+// while one of its menus is open never sends kAXMenuClosedNotification. Its menus
+// are released on termination, so focus_follows_mouse does not stay disabled.
+//
+
+static void set_open_menus(struct application *application, int count)
+{
+    int previous = open_menus;
+    open_menus += count - application->open_menus;
+    application->open_menus = count;
+    if (open_menus < 0) open_menus = 0;
+
+    if (previous == 0 && open_menus > 0) {
+        ffm_value = g_window_manager.ffm_mode;
+        g_window_manager.ffm_mode = FFM_DISABLED;
+    } else if (previous > 0 && open_menus == 0) {
+        g_window_manager.ffm_mode = ffm_value;
+    }
+}
+
+void event_loop_reset_open_menus(void)
+{
+    open_menus = 0;
+}
+
+// NOTE: tabs of one group share a frame, and a window of the same application in the same frame that
+// loses focus to another is the tab being hidden. Its opacity is what shows for a moment when it is
+// selected again, since WindowServer drops alpha changes while it is hidden, so it must not be dimmed.
+static bool window_is_outgoing_tab(struct window *outgoing, struct window *incoming)
+{
+    if (!g_window_manager.window_native_tabs) return false;
+    if (outgoing->application != incoming->application) return false;
+
+    CGRect a = {}, b = {};
+    SLSGetWindowBounds(g_connection, outgoing->id, &a);
+    SLSGetWindowBounds(g_connection, incoming->id, &b);
+
+    return fabs(a.origin.x - b.origin.x) < 2.0 && fabs(a.origin.y - b.origin.y) < 2.0 &&
+           fabs(a.size.width - b.size.width) < 2.0 && fabs(a.size.height - b.size.height) < 2.0;
+}
+
 static void window_did_receive_focus(struct window_manager *wm, struct mouse_state *ms, struct window *window)
 {
     struct window *focused_window = window_manager_find_window(wm, wm->focused_window_id);
-    if (focused_window && focused_window != window && window_space(focused_window->id) == window_space(window->id)) {
+    if (focused_window && focused_window != window && window_space(focused_window->id) == window_space(window->id) &&
+        !window_is_outgoing_tab(focused_window, window)) {
         window_manager_set_window_opacity(wm, focused_window, g_window_manager.normal_window_opacity);
     }
 
@@ -67,13 +115,14 @@ static void window_did_receive_focus(struct window_manager *wm, struct mouse_sta
     if (!view) return;
 
     struct window_node *node = view_find_window_node(view, window->id);
-    if (node->window_count <= 1) return;
+    if (!node || node->window_count <= 1) return;
 
     for (int i = 0; i < node->window_count; ++i) {
         if (node->window_order[i] != window->id) continue;
 
         memmove(node->window_order + 1, node->window_order, sizeof(uint32_t) * i);
         node->window_order[0] = window->id;
+        if (i > 0) insert_feedback_rekey(node);
 
         break;
     }
@@ -183,6 +232,13 @@ static EVENT_HANDLER(APPLICATION_LAUNCHED)
 
     int window_count;
     struct window **window_list = window_manager_add_application_windows(&g_space_manager, &g_window_manager, application, &window_count);
+
+    //
+    // NOTE: The AX API only returns windows on visible spaces. An application that restores its windows on
+    // an inactive space while launching (e.g. relaunch after an update) would otherwise never have them tracked.
+    //
+
+    window_manager_add_existing_application_windows(&g_space_manager, &g_window_manager, application, -1);
     uint32_t prev_window_id = g_window_manager.focused_window_id;
 
     uint64_t sid;
@@ -202,7 +258,9 @@ static EVENT_HANDLER(APPLICATION_LAUNCHED)
     for (int i = 0; i < window_count; ++i) {
         struct window *window = window_list[i];
 
-        if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window)) {
+        if (window_manager_should_manage_window(window) &&
+            !window_check_flag(window, WINDOW_TAB_MEMBER) &&
+            !window_manager_find_managed_window(&g_window_manager, window)) {
             if (default_origin) sid = window_space(window->id);
 
             struct view *view = space_manager_find_view(&g_space_manager, sid);
@@ -268,6 +326,7 @@ static EVENT_HANDLER(APPLICATION_TERMINATED)
 
     debug("%s: %s (%d)\n", __FUNCTION__, process->name, process->pid);
     event_signal_push(SIGNAL_APPLICATION_TERMINATED, application);
+    set_open_menus(application, 0);
     window_manager_remove_application(&g_window_manager, application->pid);
 
     for (int i = 0; i < buf_len(g_window_manager.applications_to_refresh); ++i) {
@@ -355,6 +414,60 @@ out:
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+//
+// NOTE: Move to the space of an application that was activated while none of its windows are on screen.
+// The accessibility element is optional: a process running under a debugger is never sent accessibility
+// requests, as one that is stopped at a breakpoint would block the event loop.
+//
+static struct { uint64_t target_sid; uint64_t time; } g_last_follow_to_space;
+
+static void application_follow_to_space(uint64_t target_sid, ProcessSerialNumber psn, AXUIElementRef ref)
+{
+    uint64_t now = read_os_timer();
+
+    bool gesture_in_progress = __atomic_load_n(&__pending_gesture, __ATOMIC_RELAXED);
+    uint64_t last_gesture_time = __atomic_load_n(&__last_gesture_time, __ATOMIC_RELAXED);
+    uint64_t dt_gesture_ms = (now > last_gesture_time) ? (now - last_gesture_time) / 1000000ULL : 0;
+    bool in_mc = mission_control_is_active();
+
+    //
+    // NOTE: When we move to an empty space, the system activates the next application in its
+    // activation order. That is not a user request to visit that application, so stay on the empty space.
+    //
+
+    uint64_t last_empty_focus_time = __atomic_load_n(&__last_empty_space_focus_time, __ATOMIC_RELAXED);
+    uint64_t dt_empty_focus_ms = (now > last_empty_focus_time) ? (now - last_empty_focus_time) / 1000000ULL : 0;
+
+    if (dt_empty_focus_ms < 400) {
+        debug("%s: suppressing space switch to %lld after focusing an empty space (dt=%llums)\n",
+              __FUNCTION__, target_sid, dt_empty_focus_ms);
+    } else if (in_mc || gesture_in_progress || dt_gesture_ms < 400) {
+        debug("%s: suppressing space switch to %lld during %s (in_prog=%d, dt=%llums, mc=%d)\n",
+              __FUNCTION__, target_sid, in_mc ? "mission control" : "trackpad gesture", gesture_in_progress, dt_gesture_ms, in_mc);
+    } else {
+        uint64_t dt_ms = (now > g_last_follow_to_space.time) ? (now - g_last_follow_to_space.time) / 1000000ULL : 0;
+        if (target_sid == g_last_follow_to_space.target_sid && dt_ms < 250) {
+            debug("%s: suppressing duplicate space switch to %lld (dt=%llums)\n", __FUNCTION__, target_sid, dt_ms);
+        } else if (target_sid != g_last_follow_to_space.target_sid && dt_ms < 200) {
+            debug("%s: rate-limiting rapid space switch to %lld (dt=%llums < 200ms)\n", __FUNCTION__, target_sid, dt_ms);
+        } else {
+            g_last_follow_to_space.target_sid = target_sid;
+            g_last_follow_to_space.time = now;
+            __atomic_store_n(&__last_space_change_time, now, __ATOMIC_RELEASE);
+
+            uint64_t last_cmd_tab_time = __atomic_load_n(&__last_cmd_tab_time, __ATOMIC_RELAXED);
+            float dt = ((float) now - last_cmd_tab_time) * (1000.0f / (float)read_os_freq());
+            if (dt > 1500.0f && ref) {
+                CFTypeRef dummy = NULL;
+                AXUIElementCopyAttributeValue(ref, CFSTR("__fence"), &dummy);
+            }
+
+            SLSSpaceSetFrontPSN(g_connection, target_sid, psn);
+            space_manager_focus_space(target_sid);
+        }
+    }
+}
+
 static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
 {
     struct process *process = context;
@@ -365,35 +478,161 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
         return;
     }
 
-    if (g_space_manager.skip_window_focus_animation) {
-        uint32_t focused_wid = application_focused_window(application);
-        bool focused_on_visible_space = false;
-        if (focused_wid) {
-            if (window_is_sticky(focused_wid)) {
-                focused_on_visible_space = true;
-            } else {
-                uint64_t focused_sid = window_space(focused_wid);
-                if (focused_sid && space_is_visible(focused_sid)) {
-                    focused_on_visible_space = true;
-                }
+    if (mission_control_is_active()) {
+        //
+        // NOTE: When Mission Control opens, macOS 27.2 activates an application on another space by itself, and
+        // Mission Control then shows that space. Hovering a window also activates it. Activations that do not match
+        // the window under the cursor (the window a gesture would select) are not the user's doing, so put the
+        // application that Mission Control was opened from back in front.
+        //
+
+        pid_t prev_pid = __atomic_load_n(&g_mission_control_prev_pid, __ATOMIC_RELAXED);
+        uint32_t prev_wid = __atomic_load_n(&g_mission_control_prev_wid, __ATOMIC_RELAXED);
+        uint64_t prev_sid = __atomic_load_n(&g_mission_control_prev_sid, __ATOMIC_RELAXED);
+        int reverted = __atomic_load_n(&g_mission_control_reverted_activations, __ATOMIC_RELAXED);
+
+        if (prev_pid && process->pid != prev_pid && reverted < 3) {
+            CGEventRef cursor_event = CGEventCreate(NULL);
+            CGPoint cursor = CGEventGetLocation(cursor_event);
+            CFRelease(cursor_event);
+
+            uint64_t shown_sid = display_space_id(display_manager_point_display_id(cursor));
+            struct window *hover_window = window_manager_find_window(&g_window_manager, workspace_mission_control_window_at_point(cursor, shown_sid));
+            bool cursor_moved = __atomic_load_n(&g_mission_control_cursor_moved, __ATOMIC_RELAXED);
+            bool hovered = hover_window && hover_window->application->pid == process->pid && (window_space(hover_window->id) == prev_sid || cursor_moved);
+
+            struct window *prev_window = window_manager_find_window(&g_window_manager, prev_wid);
+            if (!hovered && prev_window) {
+                debug("%s: %s (%d) activated during mission control without being under the cursor, reactivating %s..\n",
+                      __FUNCTION__, process->name, process->pid, prev_window->application->name);
+                __atomic_store_n(&g_mission_control_reverted_activations, reverted + 1, __ATOMIC_RELEASE);
+                _SLPSSetFrontProcessWithOptions(&prev_window->application->psn, prev_window->id, kCPSUserGenerated);
+                return;
             }
         }
 
-        if (!focused_on_visible_space) {
-            uint64_t psn_sid = process_manager_active_space_for_psn(application->connection);
+        debug("%s: %s (%d) front switched during mission control, ignoring..\n", __FUNCTION__, process->name, process->pid);
+        return;
+    }
 
-            uint64_t last_cmd_tab_time = __atomic_load_n(&__last_cmd_tab_time, __ATOMIC_RELAXED);
-            float dt = ((float) read_os_timer() - last_cmd_tab_time) * (1000.0f / (float)read_os_freq());
-            if (dt > 1500.0f) {
-                CFTypeRef dummy = NULL;
-                AXUIElementCopyAttributeValue(application->ref, CFSTR("__fence"), &dummy);
+    uint64_t now = read_os_timer();
+    uint64_t last_mc_exit = __atomic_load_n(&g_mission_control_exit_time, __ATOMIC_RELAXED);
+    uint64_t dt_mc_exit_ms = (now > last_mc_exit) ? (now - last_mc_exit) / 1000000ULL : 0;
+    bool mouse_clicked = __atomic_load_n(&g_mission_control_mouse_clicked, __ATOMIC_RELAXED);
+    uint32_t prev_wid = __atomic_load_n(&g_mission_control_prev_wid, __ATOMIC_RELAXED);
+    uint64_t prev_sid = __atomic_load_n(&g_mission_control_prev_sid, __ATOMIC_RELAXED);
+    pid_t prev_pid = __atomic_load_n(&g_mission_control_prev_pid, __ATOMIC_RELAXED);
+
+    if (dt_mc_exit_ms < 600 && !mouse_clicked) {
+        if (prev_pid && process->pid == prev_pid) {
+            debug("%s: %s (%d) matches prev_pid, allowing restoration after mission control exit..\n", __FUNCTION__, process->name, process->pid);
+        } else {
+            debug("%s: %s (%d) spurious front switch after mission control cancellation (prev_pid=%d), suppressing..\n",
+                  __FUNCTION__, process->name, process->pid, prev_pid);
+
+            struct window *restore_win = NULL;
+            if (prev_wid) {
+                restore_win = window_manager_find_window(&g_window_manager, prev_wid);
+            }
+            if (!restore_win && prev_sid) {
+                restore_win = window_manager_find_window_on_space_by_rank_filtering_window(&g_window_manager, prev_sid, 1, 0);
             }
 
-            if (__atomic_load_n(&__pending_window_focus, __ATOMIC_RELAXED) == false) {
-                if (psn_sid && !space_is_visible(psn_sid)) {
-                    SLSSpaceSetFrontPSN(g_connection, psn_sid, process->psn);
-                    space_manager_focus_space_using_gesture(space_display_id(psn_sid), psn_sid);
+            if (restore_win) {
+                debug("%s: forcing front process back to %s (%d) on space %lld\n",
+                      __FUNCTION__, restore_win->application->name, restore_win->id, prev_sid);
+                SLSSpaceSetFrontPSN(g_connection, prev_sid, restore_win->application->psn);
+                window_manager_focus_window_with_raise(&restore_win->application->psn, restore_win->id, restore_win->ref);
+                g_process_manager.last_front_pid = g_process_manager.front_pid;
+                g_process_manager.front_pid = restore_win->application->pid;
+                g_window_manager.last_window_id = g_window_manager.focused_window_id;
+                g_window_manager.focused_window_id = restore_win->id;
+                g_window_manager.focused_window_psn = restore_win->application->psn;
+            } else {
+                _SLPSSetFrontProcessWithOptions(&g_process_manager.finder_psn, 0, kCPSNoWindows);
+            }
+            return;
+        }
+    }
+
+    for (int i = 0; i < buf_len(g_window_manager.applications_to_refresh); ++i) {
+        if (application == g_window_manager.applications_to_refresh[i]) {
+            debug("%s: %s has windows that are not yet resolved\n", __FUNCTION__, application->name);
+            window_manager_add_existing_application_windows(&g_space_manager, &g_window_manager, application, i);
+            break;
+        }
+    }
+
+    uint32_t active_did = display_manager_active_display_id();
+    uint64_t active_sid = display_space_id(active_did);
+
+    int win_count = 0;
+    struct window **win_list = window_manager_find_application_windows(&g_window_manager, application, &win_count);
+    struct window *visible_win = NULL;
+    bool focused_on_visible_space = false;
+
+    //
+    // NOTE: A hidden native tab is ordered out, and WindowServer keeps reporting the space it was last shown on,
+    // even after its group has moved to another space. It says nothing about where the application is, so only
+    // the windows that are actually shown are considered when deciding whether to follow the application.
+    //
+
+    for (int w = 0; w < win_count; ++w) {
+        struct window *win = win_list[w];
+        if (window_check_flag(win, WINDOW_TAB_MEMBER)) continue;
+        if (window_check_flag(win, WINDOW_STICKY) || window_is_sticky(win->id)) {
+            focused_on_visible_space = true;
+            if (!visible_win) visible_win = win;
+            break;
+        }
+        uint64_t w_sid = window_space(win->id);
+        if (w_sid && space_is_visible(w_sid)) {
+            focused_on_visible_space = true;
+            if (!visible_win || w_sid == active_sid) {
+                visible_win = win;
+            }
+        }
+    }
+
+    if (g_space_manager.skip_window_focus_animation) {
+        uint64_t target_sid = 0;
+
+        if (!focused_on_visible_space) {
+            uint32_t focused_wid = application_focused_window(application);
+            if (focused_wid) {
+                if (window_is_sticky(focused_wid)) {
+                    focused_on_visible_space = true;
+                } else {
+                    uint64_t focused_sid = window_space(focused_wid);
+                    if (focused_sid) {
+                        if (space_is_visible(focused_sid)) {
+                            focused_on_visible_space = true;
+                        } else {
+                            target_sid = focused_sid;
+                        }
+                    }
                 }
+            }
+
+            if (!target_sid && win_count > 0) {
+                for (int w = 0; w < win_count; ++w) {
+                    if (window_check_flag(win_list[w], WINDOW_TAB_MEMBER)) continue;
+                    if (!window_is_sticky(win_list[w]->id) && !window_check_flag(win_list[w], WINDOW_STICKY)) {
+                        uint64_t w_sid = window_space(win_list[w]->id);
+                        if (w_sid) {
+                            target_sid = w_sid;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!target_sid && application->connection > 0) {
+                target_sid = process_manager_active_space_for_psn(application->connection);
+            }
+
+            if (!focused_on_visible_space && target_sid && !space_is_visible(target_sid)) {
+                application_follow_to_space(target_sid, process->psn, application->ref);
             }
         }
     }
@@ -407,17 +646,44 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
     g_process_manager.last_front_pid = g_process_manager.front_pid;
     g_process_manager.front_pid = process->pid;
     event_signal_push(SIGNAL_APPLICATION_FRONT_SWITCHED, NULL);
+    uint32_t application_focused_window_id = application_focused_window(application);
+    struct window *window = window_manager_find_window(&g_window_manager, application_focused_window_id);
 
-    for (int i = 0; i < buf_len(g_window_manager.applications_to_refresh); ++i) {
-        if (application == g_window_manager.applications_to_refresh[i]) {
-            debug("%s: %s has windows that are not yet resolved\n", __FUNCTION__, application->name);
-            window_manager_add_existing_application_windows(&g_space_manager, &g_window_manager, application, i);
-            break;
+    if (visible_win) {
+        if (!window || !space_is_visible(window_space(window->id))) {
+            window = visible_win;
+        }
+    } else if (!window && win_count > 0) {
+        for (int w = 0; w < win_count; ++w) {
+            if (window_check_flag(win_list[w], WINDOW_TAB_MEMBER)) continue;
+            uint64_t sid = window_space(win_list[w]->id);
+            if (space_is_visible(sid) || window_is_sticky(win_list[w]->id) || window_check_flag(win_list[w], WINDOW_STICKY)) {
+                window = win_list[w];
+                break;
+            }
         }
     }
 
-    uint32_t application_focused_window_id = application_focused_window(application);
-    if (!application_focused_window_id) {
+    if (!window) {
+        if (dt_mc_exit_ms < 800) {
+            struct window *curr_win = window_manager_find_window_on_space_by_rank_filtering_window(&g_window_manager, g_space_manager.current_space_id, 1, 0);
+            if (curr_win) {
+                debug("%s: suppressing front switch to %s with no windows on current space %lld, restoring %s %d\n",
+                      __FUNCTION__, application->name, g_space_manager.current_space_id, curr_win->application->name, curr_win->id);
+                SLSSpaceSetFrontPSN(g_connection, g_space_manager.current_space_id, curr_win->application->psn);
+                window_manager_focus_window_with_raise(&curr_win->application->psn, curr_win->id, curr_win->ref);
+                g_process_manager.last_front_pid = g_process_manager.front_pid;
+                g_process_manager.front_pid = curr_win->application->pid;
+                g_window_manager.last_window_id = g_window_manager.focused_window_id;
+                g_window_manager.focused_window_id = curr_win->id;
+                g_window_manager.focused_window_psn = curr_win->application->psn;
+                return;
+            } else {
+                _SLPSSetFrontProcessWithOptions(&g_process_manager.finder_psn, 0, kCPSNoWindows);
+                return;
+            }
+        }
+
         struct window *focused_window = window_manager_find_window(&g_window_manager, g_window_manager.focused_window_id);
         if (focused_window) {
             window_manager_set_window_opacity(&g_window_manager, focused_window, g_window_manager.normal_window_opacity);
@@ -431,23 +697,40 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
         return;
     }
 
-    struct window *window = window_manager_find_window(&g_window_manager, application_focused_window_id);
-    if (!window) {
-        struct window *focused_window = window_manager_find_window(&g_window_manager, g_window_manager.focused_window_id);
-        if (focused_window) {
-            window_manager_set_window_opacity(&g_window_manager, focused_window, g_window_manager.normal_window_opacity);
-        }
-
-        window_manager_add_lost_focused_event(&g_window_manager, application_focused_window_id);
-        return;
-    }
-
     window_did_receive_focus(&g_window_manager, &g_mouse_state, window);
     event_signal_push(SIGNAL_WINDOW_FOCUSED, window);
     __atomic_store_n(&__pending_window_focus, false, __ATOMIC_RELEASE);
     window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, g_space_manager.current_space_id);
 }
 #pragma clang diagnostic pop
+
+static EVENT_HANDLER(DEBUGGED_APPLICATION_FRONT_SWITCHED)
+{
+    pid_t pid = (pid_t)(intptr_t) context;
+    int connection = param1;
+
+    if (!g_space_manager.skip_window_focus_animation) return;
+
+    uint64_t now = read_os_timer();
+    uint64_t last_mc_exit = __atomic_load_n(&g_mission_control_exit_time, __ATOMIC_RELAXED);
+    uint64_t dt_mc_exit_ms = (now > last_mc_exit) ? (now - last_mc_exit) / 1000000ULL : 0;
+    if (dt_mc_exit_ms < 600) {
+        debug("%s: %d front switched right after mission control, ignoring..\n", __FUNCTION__, pid);
+        return;
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    ProcessSerialNumber psn = {0};
+    if (GetProcessForPID(pid, &psn) != noErr) return;
+#pragma clang diagnostic pop
+
+    uint64_t sid = process_manager_active_space_for_psn(connection);
+    if (!sid || space_is_visible(sid)) return;
+
+    debug("%s: %d is running under a debugger, following it to space %lld\n", __FUNCTION__, pid, sid);
+    application_follow_to_space(sid, psn, NULL);
+}
 
 static EVENT_HANDLER(APPLICATION_VISIBLE)
 {
@@ -467,7 +750,9 @@ static EVENT_HANDLER(APPLICATION_VISIBLE)
     for (int i = 0; i < window_count; ++i) {
         struct window *window = window_list[i];
 
-        if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window)) {
+        if (window_manager_should_manage_window(window) &&
+            !window_check_flag(window, WINDOW_TAB_MEMBER) &&
+            !window_manager_find_managed_window(&g_window_manager, window)) {
             struct view *view = space_manager_find_view(&g_space_manager, window_space(window->id));
             if (view->layout == VIEW_FLOAT) continue;
 
@@ -574,6 +859,101 @@ static EVENT_HANDLER(APPLICATION_HIDDEN)
     event_signal_push(SIGNAL_APPLICATION_HIDDEN, application);
 }
 
+static bool tabbed_window_swap(struct view *view, struct window *a, struct window *b);
+
+#define TAB_SWITCH_PAIR_MS 250.0f
+#define TAB_ORDERED_OUT_SLOTS 8
+
+// NOTE: deduped by wid -- an open menu repeats the removal for its own untracked wid and would
+// otherwise flush the entry the create reads back.
+static struct {
+    uint32_t wid[TAB_ORDERED_OUT_SLOTS];
+    uint64_t time[TAB_ORDERED_OUT_SLOTS];
+    int index;
+} g_tab_ordered_out;
+
+static void tab_ordered_out_record(uint32_t wid)
+{
+    for (int i = 0; i < TAB_ORDERED_OUT_SLOTS; ++i) {
+        if (g_tab_ordered_out.wid[i] != wid) continue;
+        g_tab_ordered_out.time[i] = read_os_timer();
+        return;
+    }
+
+    g_tab_ordered_out.wid[g_tab_ordered_out.index] = wid;
+    g_tab_ordered_out.time[g_tab_ordered_out.index] = read_os_timer();
+    g_tab_ordered_out.index = (g_tab_ordered_out.index + 1) % TAB_ORDERED_OUT_SLOTS;
+}
+
+// NOTE: a recent removal alone cannot refuse the tile -- a new window of an app that posts the create
+// before the space add is not ordered in either, and gets no 815 to recover on.
+static bool tabbed_window_adopt_hidden(struct window *window)
+{
+    if (!g_window_manager.window_native_tabs) return false;
+
+    uint64_t now = read_os_timer();
+
+    for (int i = 0; i < TAB_ORDERED_OUT_SLOTS; ++i) {
+        if (g_tab_ordered_out.wid[i] != window->id) continue;
+        if (((float)(now - g_tab_ordered_out.time[i])) * (1000.0f / (float) read_os_freq()) >= TAB_SWITCH_PAIR_MS) return false;
+
+        uint8_t ordered_in = 0;
+        SLSWindowIsOrderedIn(g_connection, window->id, &ordered_in);
+        if (ordered_in) return false;
+
+        window_set_flag(window, WINDOW_TAB_MEMBER);
+        return true;
+    }
+
+    return false;
+}
+
+// NOTE: WindowServer drops an alpha change for a window that is ordered out, so a hidden tab keeps the
+// opacity it had when it was hidden -- through window_opacity off and through focus moving elsewhere.
+// Whatever it should have now is applied when it is shown again.
+static void tabbed_window_sync_opacity(struct window *window)
+{
+    float opacity = window->opacity;
+    if (opacity == 0.0f) {
+        if (!g_window_manager.enable_window_opacity) {
+            opacity = 1.0f;
+        } else if (window->id == g_window_manager.focused_window_id) {
+            opacity = g_window_manager.active_window_opacity;
+        } else {
+            opacity = g_window_manager.normal_window_opacity;
+        }
+    }
+
+    if (fabsf(window_opacity(window->id) - opacity) > 0.001f) {
+        window_manager_set_opacity(&g_window_manager, window, opacity);
+    }
+}
+
+// NOTE: the incoming tab's own focus event names a window that is not tracked yet and is dropped, so
+// the handover is the only place that sees focus move -- it has to carry the opacity along, or the new
+// tab keeps the normal_window_opacity it was given when it was created. The outgoing tab is left alone:
+// it is about to be hidden, and the opacity it keeps is what shows for a moment when it is selected again.
+static void tabbed_window_hand_over_focus(struct window *from, struct window *to)
+{
+    if (g_window_manager.focused_window_id == from->id) {
+        g_window_manager.focused_window_id = to->id;
+    }
+
+    tabbed_window_sync_opacity(to);
+}
+
+// NOTE: a floating group has no node to swap, so the state has to move to the tab that took over.
+static void tabbed_window_hand_over_float(struct window *from, struct window *to)
+{
+    window_clear_flag(from, WINDOW_FLOAT);
+    window_set_flag(from, WINDOW_TAB_MEMBER);
+    window_set_flag(to, WINDOW_FLOAT);
+    window_clear_flag(to, WINDOW_TAB_MEMBER);
+
+    // NOTE: same as a swap -- the next tab pairs against the focused window.
+    tabbed_window_hand_over_focus(from, to);
+}
+
 static EVENT_HANDLER(WINDOW_CREATED)
 {
     uint32_t window_id = ax_window_id(context);
@@ -595,26 +975,57 @@ static EVENT_HANDLER(WINDOW_CREATED)
     for (int i = 0; i < rule_len; ++i) {
         if (rule_check_flag(&g_window_manager.rules[i], RULE_ONE_SHOT_REMOVE)) {
             rule_destroy(&g_window_manager.rules[i]);
-            if (buf_del(g_window_manager.rules, i)) {
+            if (buf_del_ordered(g_window_manager.rules, i)) {
                 --i;
                 --rule_len;
             }
         }
     }
 
-    if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window)) {
-        uint64_t sid;
+    if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window) &&
+        !tabbed_window_adopt_hidden(window)) {
+        // NOTE: a new window whose same-app predecessor just left the space is that group's incoming
+        // tab, and nothing else names the group -- the 1325/1326 pair cannot swap it because the
+        // incoming window is not tracked until this event, so the predecessor is the only signal.
+        uint32_t prev = g_window_manager.focused_window_id;
+        struct window *a = prev && prev != window->id ? window_manager_find_window(&g_window_manager, prev) : NULL;
+        struct view *tab_view = g_window_manager.window_native_tabs && a && a->application == window->application
+                                  ? window_manager_find_managed_window(&g_window_manager, a) : NULL;
 
-        if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_DEFAULT) {
-            sid = window_space(window->id);
-        } else if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_FOCUSED) {
-            sid = g_space_manager.current_space_id;
-        } else /* if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_CURSOR) */ {
-            sid = space_manager_cursor_space();
+        uint8_t prev_ordered_in = 1;
+        if (tab_view) SLSWindowIsOrderedIn(g_connection, a->id, &prev_ordered_in);
+
+        // NOTE: the predecessor usually leaves the space after this event, which would tile the new
+        // tab until the 1325/1326 pair undoes it. A tab bar alone proves nothing, as it can be shown on
+        // a standalone window, but a bar with a second tab does -- even in a burst of new tabs.
+        bool swapped = tab_view && tab_view->layout != VIEW_FLOAT &&
+                       (!prev_ordered_in || window_ax_tab_count(window) > 1) &&
+                       tabbed_window_swap(tab_view, a, window);
+
+        bool floated = !swapped && g_window_manager.window_native_tabs &&
+                       a && a->application == window->application && window_check_flag(a, WINDOW_FLOAT) &&
+                       window_ax_tab_count(window) > 1;
+        if (floated) tabbed_window_hand_over_float(a, window);
+
+        if (!swapped && !floated) {
+            uint64_t sid;
+
+            if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_DEFAULT) {
+                // NOTE: a window is on no space yet at this event, and window_space then guesses the
+                // active space of a display resolved from unsettled bounds -- the predecessor names
+                // the space the window is about to land on, so prefer it while the query is empty.
+                int space_count = 0;
+                if (tab_view) window_space_list(window->id, &space_count);
+                sid = tab_view && !space_count ? tab_view->sid : window_space(window->id);
+            } else if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_FOCUSED) {
+                sid = g_space_manager.current_space_id;
+            } else /* if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_CURSOR) */ {
+                sid = space_manager_cursor_space();
+            }
+
+            struct view *view = space_manager_tile_window_on_space(&g_space_manager, window, sid);
+            window_manager_add_managed_window(&g_window_manager, window, view);
         }
-
-        struct view *view = space_manager_tile_window_on_space(&g_space_manager, window, sid);
-        window_manager_add_managed_window(&g_window_manager, window, view);
     }
 
     if (window_manager_is_window_eligible(window)) {
@@ -625,6 +1036,18 @@ static EVENT_HANDLER(WINDOW_CREATED)
         update_window_notifications();
     }
 }
+
+static struct {
+    pid_t pid;
+    uint64_t time;
+} g_tab_closed_float;
+
+#define TAB_PROMOTE_MS 50.0f
+
+static struct {
+    uint32_t wid;
+    uint64_t time;
+} g_tab_promoted;
 
 static EVENT_HANDLER(WINDOW_DESTROYED)
 {
@@ -637,9 +1060,25 @@ static EVENT_HANDLER(WINDOW_DESTROYED)
     debug("%s: %s %d\n", __FUNCTION__, window->application ? window->application->name : "<unknown>", window->id);
 
     struct view *view = window_manager_find_managed_window(&g_window_manager, window);
+
+    // NOTE: the 1325/1326 pair normally hands the node to the successor tab before this event, but the
+    // pair and the destroy come from different sources -- keep the handover for when the destroy wins.
+    if (view && view->layout != VIEW_FLOAT && g_tab_promoted.wid && g_tab_promoted.wid != window->id) {
+        float dt = ((float)(read_os_timer() - g_tab_promoted.time)) * (1000.0f / (float) read_os_freq());
+        struct window *heir = dt < TAB_PROMOTE_MS ? window_manager_find_window(&g_window_manager, g_tab_promoted.wid) : NULL;
+
+        if (heir && heir->application == window->application && tabbed_window_swap(view, window, heir)) {
+            g_tab_promoted.wid = 0;
+            view = NULL;
+        }
+    }
+
     if (view) {
         space_manager_untile_window(view, window);
         window_manager_remove_managed_window(&g_window_manager, window->id);
+    } else if (g_window_manager.window_native_tabs && window_check_flag(window, WINDOW_FLOAT)) {
+        g_tab_closed_float.pid = window->application->pid;
+        g_tab_closed_float.time = read_os_timer();
     }
 
     if (g_mouse_state.window == window) g_mouse_state.window = NULL;
@@ -657,6 +1096,77 @@ static EVENT_HANDLER(WINDOW_DESTROYED)
     if (workspace_is_macos_sequoia() || (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
         update_window_notifications();
     }
+}
+
+#define WINDOW_FOCUS_FROM_TAB 1
+
+// NOTE: window_space reports a space for a hidden tab, so ordered-in is the only reliable test for one.
+// Moving a tab out to its own window posts no create and no 1326 -- 815 is the only signal it happened.
+static bool tabbed_window_follow_float(struct window *window)
+{
+    // NOTE: the tab comes forward after the destroy when the floating tab was closed.
+    if (g_tab_closed_float.pid == window->application->pid) {
+        float dt = ((float)(read_os_timer() - g_tab_closed_float.time)) * (1000.0f / (float) read_os_freq());
+        g_tab_closed_float.pid = 0;
+
+        if (dt < TAB_SWITCH_PAIR_MS) {
+            window_set_flag(window, WINDOW_FLOAT);
+            window_clear_flag(window, WINDOW_TAB_MEMBER);
+            return true;
+        }
+    }
+
+    struct window *prev = window_manager_find_window(&g_window_manager, g_window_manager.last_window_id);
+    if (!prev || prev == window || prev->application != window->application) return false;
+    if (!window_check_flag(prev, WINDOW_FLOAT)) return false;
+
+    uint8_t ordered_in = 0;
+    SLSWindowIsOrderedIn(g_connection, prev->id, &ordered_in);
+    if (ordered_in) return false;
+
+    tabbed_window_hand_over_float(prev, window);
+    return true;
+}
+
+static void tabbed_window_promote(struct window *window)
+{
+    uint8_t ordered_in = 0;
+    SLSWindowIsOrderedIn(g_connection, window->id, &ordered_in);
+    if (!ordered_in) return;
+
+    uint64_t sid = window_space(window->id);
+    if (!sid) return;
+
+    // NOTE: keep the flag on a window that cannot be managed yet -- a seeded tab reads its eligibility
+    // while ordered out, and clearing here would strand it with neither a node nor a later promote.
+    if (!window_manager_should_manage_window(window)) return;
+    if (tabbed_window_follow_float(window)) return;
+
+    window_clear_flag(window, WINDOW_TAB_MEMBER);
+    if (window_manager_find_managed_window(&g_window_manager, window)) return;
+
+    struct view *view = space_manager_tile_window_on_space(&g_space_manager, window, sid);
+    window_manager_add_managed_window(&g_window_manager, window, view);
+    tabbed_window_sync_opacity(window);
+}
+
+// NOTE: merging windows into one group orders each of them out and drops it from the space with no pair
+// and no destroy, so a managed window that is no longer ordered in has become a hidden tab and must give
+// up its node -- never the focused one, which is the group they merge into and the tab a switch replaces.
+static void tabbed_window_demote(struct window *window)
+{
+    if (g_window_manager.focused_window_id == window->id) return;
+
+    uint8_t ordered_in = 0;
+    SLSWindowIsOrderedIn(g_connection, window->id, &ordered_in);
+    if (ordered_in) return;
+
+    struct view *view = window_manager_find_managed_window(&g_window_manager, window);
+    if (!view || view->layout == VIEW_FLOAT) return;
+
+    space_manager_untile_window(view, window);
+    window_manager_remove_managed_window(&g_window_manager, window->id);
+    window_set_flag(window, WINDOW_TAB_MEMBER);
 }
 
 static EVENT_HANDLER(WINDOW_FOCUSED)
@@ -684,17 +1194,44 @@ static EVENT_HANDLER(WINDOW_FOCUSED)
         return;
     }
 
+    if (mission_control_is_active()) {
+        debug("%s: %s %d received focus during mission control, ignoring..\n", __FUNCTION__, window->application->name, window->id);
+        return;
+    }
+
+    uint64_t now = read_os_timer();
+    uint64_t last_mc_exit = __atomic_load_n(&g_mission_control_exit_time, __ATOMIC_RELAXED);
+    uint64_t dt_mc_exit_ms = (now > last_mc_exit) ? (now - last_mc_exit) / 1000000ULL : 0;
+    bool mouse_clicked = __atomic_load_n(&g_mission_control_mouse_clicked, __ATOMIC_RELAXED);
+    uint32_t prev_wid = __atomic_load_n(&g_mission_control_prev_wid, __ATOMIC_RELAXED);
+
+    if (dt_mc_exit_ms < 600 && !mouse_clicked) {
+        if (prev_wid && window->id != prev_wid) {
+            debug("%s: %s %d received focus after mission control cancellation (prev_wid=%d), ignoring..\n",
+                  __FUNCTION__, window->application->name, window->id, prev_wid);
+            return;
+        }
+    }
+
+    // NOTE: the tab a swap demoted can still have a plain focus event in flight; letting it land points
+    // focused_window_id at a window with no node, and every later tab pairs against that and opens a
+    // second one. A hidden tab is never ordered in, so it cannot legitimately hold focus.
+    if (param1 != WINDOW_FOCUS_FROM_TAB && window_check_flag(window, WINDOW_TAB_MEMBER)) {
+        uint8_t ordered_in = 0;
+        SLSWindowIsOrderedIn(g_connection, window->id, &ordered_in);
+        if (!ordered_in) return;
+
+        tabbed_window_promote(window);
+    }
+
     debug("%s: %s %d\n", __FUNCTION__, window->application->name, window->id);
 
-    if (g_space_manager.skip_window_focus_animation) {
-        bool is_sticky = window_check_flag(window, WINDOW_STICKY) || window_is_sticky(window->id);
-        if (!is_sticky) {
-            uint64_t sid = window_space(window->id);
-            if (sid && !space_is_visible(sid)) {
-                SLSSpaceSetFrontPSN(g_connection, sid, window->application->psn);
-                space_manager_focus_space_using_gesture(space_display_id(sid), sid);
-            }
-        }
+    bool is_sticky = window_check_flag(window, WINDOW_STICKY) || window_is_sticky(window->id);
+    uint64_t sid = window_space(window->id);
+
+    if (!is_sticky && sid && !space_is_visible(sid)) {
+        debug("%s: %s %d is on invisible space %lld, skipping focus assignment\n", __FUNCTION__, window->application->name, window->id, sid);
+        return;
     }
 
     window_did_receive_focus(&g_window_manager, &g_mouse_state, window);
@@ -708,6 +1245,68 @@ static EVENT_HANDLER(WINDOW_FOCUSED)
             view_flush(view);
         }
     }
+}
+
+static bool tabbed_window_swap(struct view *view, struct window *a, struct window *b)
+{
+    struct view *b_view = window_manager_find_managed_window(&g_window_manager, b);
+    if ((b_view && b_view != view) ||
+        !window_manager_should_manage_window(b) ||
+        !view_find_window_node(view, a->id)) {
+        debug("%s: %s %d -> %d rejected\n", __FUNCTION__, b->application->name, a->id, b->id);
+        return false;
+    }
+
+    // NOTE: Finder posts kAXFocusedWindowChanged for a tabbed window, which AppKit suppresses
+    // everywhere else, so the incoming tab may already be tiled by the time the pair lands.
+    if (b_view) {
+        space_manager_untile_window(view, b);
+        window_manager_remove_managed_window(&g_window_manager, b->id);
+    }
+
+    if (!view_swap_node_window(view, a->id, b->id)) {
+        debug("%s: %s %d -> %d rejected\n", __FUNCTION__, b->application->name, a->id, b->id);
+        return false;
+    }
+
+    window_manager_adjust_layer(a, LAYER_NORMAL);
+    window_manager_remove_managed_window(&g_window_manager, a->id);
+    window_manager_adjust_layer(b, LAYER_BELOW);
+    window_manager_add_managed_window(&g_window_manager, b, view);
+    window_set_flag(a, WINDOW_TAB_MEMBER);
+    window_clear_flag(b, WINDOW_TAB_MEMBER);
+
+    // NOTE: the create path pairs a new tab against the focused window, so focus has to follow the swap
+    // or the next new tab in that group pairs against a demoted window and opens a second node.
+    tabbed_window_hand_over_focus(a, b);
+
+    // NOTE: not window_node_flush; that animates the incoming tab in from the frame it kept while hidden.
+    struct window_node *node = view_find_window_node(view, b->id);
+    struct area area = node->zoom ? node->zoom->area : node->area;
+    window_manager_set_window_frame(b, area.x, area.y, area.w, area.h);
+
+    debug("%s: %s %d -> %d\n", __FUNCTION__, b->application->name, a->id, b->id);
+    return true;
+}
+
+// NOTE: AppKit posts this instead of kAXFocusedWindowChanged for a tabbed window and names only the
+// INCOMING tab; the outgoing one is named by the 1325/1326 pair, which is where the node swap happens.
+// An unknown wid is a window still being created -- adopting it here would starve WINDOW_CREATED.
+static EVENT_HANDLER(TABBED_WINDOW_FOCUSED)
+{
+    uint32_t wid = (uint32_t) param1;
+    CFRelease(context);
+
+    if (!g_window_manager.window_native_tabs) return;
+
+    debug("%s: %d\n", __FUNCTION__, wid);
+
+    if (!window_manager_find_window(&g_window_manager, wid)) return;
+
+    g_tab_promoted.wid = wid;
+    g_tab_promoted.time = read_os_timer();
+
+    event_loop_post(&g_event_loop, WINDOW_FOCUSED, (void *)(intptr_t) wid, WINDOW_FOCUS_FROM_TAB);
 }
 
 static EVENT_HANDLER(WINDOW_MOVED)
@@ -984,7 +1583,9 @@ static EVENT_HANDLER(WINDOW_DEMINIMIZED)
     uint64_t sid = space_manager_active_space();
     if (space_manager_is_window_on_space(sid, window)) {
         debug("%s: window %s %d is deminimized on active space\n", __FUNCTION__, window->application->name, window->id);
-        if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window)) {
+        if (window_manager_should_manage_window(window) &&
+            !window_check_flag(window, WINDOW_TAB_MEMBER) &&
+            !window_manager_find_managed_window(&g_window_manager, window)) {
             struct window *last_window = window_manager_find_window(&g_window_manager, g_window_manager.last_window_id);
             uint32_t insertion_point = last_window && last_window->application->pid != window->application->pid ? last_window->id : 0;
             struct view *view = space_manager_tile_window_on_space_with_insertion_point(&g_space_manager, window, sid, insertion_point);
@@ -1030,6 +1631,69 @@ static EVENT_HANDLER(SLS_WINDOW_ORDERED)
     if (node) SLSOrderWindow(g_connection, node->feedback_window.id, 1, node->window_order[0]);
 }
 
+static EVENT_HANDLER(SLS_WINDOW_VISIBLE)
+{
+    if (!g_window_manager.window_native_tabs) return;
+
+    uint32_t wid = (uint64_t)(intptr_t) context;
+    debug("%s: %d\n", __FUNCTION__, wid);
+
+    struct window *window = window_manager_find_window(&g_window_manager, wid);
+    if (window && window_check_flag(window, WINDOW_TAB_MEMBER)) tabbed_window_promote(window);
+}
+
+static struct {
+    uint32_t wid;
+    uint64_t time;
+} g_tab_ordered_in;
+
+static EVENT_HANDLER(SLS_ADDED_TO_SPACE)
+{
+    if (!g_window_manager.window_native_tabs) return;
+
+    uint32_t wid = (uint64_t)(intptr_t) context;
+    debug("%s: %d\n", __FUNCTION__, wid);
+
+    // NOTE: tearing a tab out puts an untracked drag proxy on the space between the pair, and stashing
+    // it would shadow the tab actually coming forward -- only a tracked window can be the incoming one.
+    if (!window_manager_find_window(&g_window_manager, wid)) return;
+
+    g_tab_ordered_in.wid = wid;
+    g_tab_ordered_in.time = read_os_timer();
+}
+
+// NOTE: a hidden tab coming forward is the one thing that pairs a space add with a space removal, but
+// both notifications are noisy alone -- a tooltip adds and removes the same wid, a closing window
+// repeats the removal -- so the pair is only a tab switch when it names two known windows of one app.
+static EVENT_HANDLER(SLS_REMOVED_FROM_SPACE)
+{
+    if (!g_window_manager.window_native_tabs) return;
+
+    uint32_t wid = (uint64_t)(intptr_t) context;
+    debug("%s: %d\n", __FUNCTION__, wid);
+
+    struct window *a = window_manager_find_window(&g_window_manager, wid);
+    if (!a) {
+        tab_ordered_out_record(wid);
+        return;
+    }
+
+    uint32_t incoming = g_tab_ordered_in.wid;
+    if (incoming && incoming != wid) {
+        float dt = ((float)(read_os_timer() - g_tab_ordered_in.time)) * (1000.0f / (float) read_os_freq());
+        struct window *b = dt < TAB_SWITCH_PAIR_MS ? window_manager_find_window(&g_window_manager, incoming) : NULL;
+        struct view *view = b && b->application == a->application
+                              ? window_manager_find_managed_window(&g_window_manager, a) : NULL;
+
+        if (view && view->layout != VIEW_FLOAT) {
+            g_tab_ordered_in.wid = 0;
+            if (tabbed_window_swap(view, a, b)) return;
+        }
+    }
+
+    tabbed_window_demote(a);
+}
+
 static EVENT_HANDLER(SLS_WINDOW_DESTROYED)
 {
     uint32_t wid = (uint64_t)(intptr_t) context;
@@ -1069,11 +1733,37 @@ static EVENT_HANDLER(SLS_SPACE_DESTROYED)
         view_destroy(view);
         free(view);
         event_signal_push(SIGNAL_SPACE_DESTROYED, context);
+
+        if (space_is_user(g_space_manager.current_space_id)) {
+            window_manager_validate_and_check_for_windows_on_space(&g_space_manager, &g_window_manager, g_space_manager.current_space_id);
+        }
     }
 }
 
 static EVENT_HANDLER(SPACE_CHANGED)
 {
+    if (mission_control_is_active()) {
+        debug("%s: space changed during mission control, ignoring..\n", __FUNCTION__);
+        return;
+    }
+
+    uint64_t now = read_os_timer();
+    uint64_t last_mc_exit = __atomic_load_n(&g_mission_control_exit_time, __ATOMIC_RELAXED);
+    uint64_t dt_mc_exit_ms = (now > last_mc_exit) ? (now - last_mc_exit) / 1000000ULL : 0;
+    bool mouse_clicked = __atomic_load_n(&g_mission_control_mouse_clicked, __ATOMIC_RELAXED);
+    uint64_t prev_sid = __atomic_load_n(&g_mission_control_prev_sid, __ATOMIC_RELAXED);
+
+    if (dt_mc_exit_ms < 400 && !mouse_clicked) {
+        uint64_t active_sid = space_manager_active_space();
+        if (prev_sid && active_sid != prev_sid) {
+            debug("%s: space changed to %lld after mission control cancellation, restoring prev_sid %lld..\n",
+                  __FUNCTION__, active_sid, prev_sid);
+            space_manager_focus_space(prev_sid);
+            return;
+        }
+    }
+
+    __atomic_store_n(&__last_space_change_time, now, __ATOMIC_RELEASE);
     g_space_manager.last_space_id = g_space_manager.current_space_id;
     g_space_manager.current_space_id = space_manager_active_space();
 
@@ -1104,6 +1794,45 @@ static EVENT_HANDLER(SPACE_CHANGED)
             window_node_flush(view->root);
             view_clear_flag(view, VIEW_IS_DIRTY);
         }
+
+        //
+        // NOTE: Switching spaces through the scripting-addition (space --focus) does not make the Dock activate
+        // an application on the new space, so the previous front process stays active while all of its windows
+        // are on another space. Activating that application again (e.g. through an app-hotkey) is then a no-op
+        // for the WindowServer: no front-switched event is sent, and we never get to move to its space.
+        // Hand focus to the top window of the new space, the same way a native space switch would.
+        //
+
+        if (dt_mc_exit_ms >= 800) {
+            struct application *front_application = window_manager_focused_application(&g_window_manager);
+            if (front_application) {
+                bool has_visible_window = false;
+                int win_count = 0;
+                struct window **win_list = window_manager_find_application_windows(&g_window_manager, front_application, &win_count);
+
+                for (int w = 0; w < win_count; ++w) {
+                    struct window *win = win_list[w];
+                    if (window_check_flag(win, WINDOW_TAB_MEMBER)) continue;
+                    if (window_check_flag(win, WINDOW_STICKY) || window_is_sticky(win->id) || space_is_visible(window_space(win->id))) {
+                        has_visible_window = true;
+                        break;
+                    }
+                }
+
+                if (!has_visible_window) {
+                    struct window *top_window = window_manager_find_window_on_space_by_rank_filtering_window(&g_window_manager, g_space_manager.current_space_id, 1, 0);
+                    if (top_window) {
+                        debug("%s: front process %s has no windows on visible spaces, focusing %s %d\n",
+                              __FUNCTION__, front_application->name, top_window->application->name, top_window->id);
+                        window_manager_focus_window_with_raise(&top_window->application->psn, top_window->id, top_window->ref);
+                    } else if (!psn_equals(&front_application->psn, &g_process_manager.finder_psn)) {
+                        debug("%s: front process %s has no windows on visible spaces, activating finder\n", __FUNCTION__, front_application->name);
+                        __atomic_store_n(&__last_empty_space_focus_time, read_os_timer(), __ATOMIC_RELEASE);
+                        _SLPSSetFrontProcessWithOptions(&g_process_manager.finder_psn, 0, kCPSNoWindows);
+                    }
+                }
+            }
+        }
     }
 
     event_signal_push(SIGNAL_SPACE_CHANGED, NULL);
@@ -1117,6 +1846,7 @@ static EVENT_HANDLER(DISPLAY_CHANGED)
         return;
     }
 
+    __atomic_store_n(&__last_space_change_time, read_os_timer(), __ATOMIC_RELEASE);
     g_display_manager.last_display_id = g_display_manager.current_display_id;
     g_display_manager.current_display_id = new_did;
 
@@ -1210,6 +1940,8 @@ static EVENT_HANDLER(MOUSE_DOWN)
     g_mouse_state.window->frame = window_ax_frame(g_mouse_state.window);
     g_mouse_state.window_frame = g_mouse_state.window->frame;
     g_mouse_state.down_location = point;
+    g_mouse_state.origin_location = point;
+    g_mouse_state.resize_applied = false;
     g_mouse_state.direction = 0;
 
     int64_t button = CGEventGetIntegerValueField(context, kCGMouseEventButtonNumber);
@@ -1269,7 +2001,9 @@ static EVENT_HANDLER(MOUSE_UP)
     struct mouse_window_info info;
     mouse_window_info_populate(&g_mouse_state, &info);
 
-    if (info.changed_position && !info.changed_size) {
+    bool cursor_moved = mouse_gesture_moved(&g_mouse_state, point);
+
+    if (cursor_moved && info.changed_position && !info.changed_size) {
         uint64_t cursor_sid = display_space_id(display_manager_point_display_id(point));
         struct view *dst_view = space_manager_find_view(&g_space_manager, cursor_sid);
 
@@ -1314,7 +2048,7 @@ static EVENT_HANDLER(MOUSE_UP)
         } else if (a_node) {
             mouse_drop_no_target(&g_space_manager, &g_window_manager, src_view, dst_view, g_mouse_state.window, a_node);
         }
-    } else if (info.changed_position || info.changed_size) {
+    } else if (cursor_moved && (info.changed_position || info.changed_size)) {
         if (!g_mouse_state.live_resized) {
             mouse_drop_try_adjust_bsp_grid(&g_window_manager, src_view, g_mouse_state.window, &info);
         }
@@ -1323,6 +2057,12 @@ static EVENT_HANDLER(MOUSE_UP)
 err:
     g_mouse_state.window = NULL;
 res:
+    if (g_mouse_state.feedback_node) {
+        g_mouse_state.feedback_node->insert_dir = 0;
+        insert_feedback_destroy(g_mouse_state.feedback_node);
+        g_mouse_state.feedback_node = NULL;
+    }
+
     g_mouse_state.live_resized = false;
     g_mouse_state.current_action = MOUSE_MODE_NONE;
 out:
@@ -1359,16 +2099,19 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
             window_manager_move_window(g_mouse_state.window, new_point.x, new_point.y);
         }
     } else if (g_mouse_state.current_action == MOUSE_MODE_RESIZE) {
+        struct view *view = window_manager_find_managed_window(&g_window_manager, g_mouse_state.window);
+        bool is_bsp_live = g_window_manager.adaptive_resize && view && view->layout == VIEW_BSP;
+
         uint64_t event_time = read_os_timer();
         float dt = ((float) event_time - g_mouse_state.last_moved_time) * (1000.0f / (float)read_os_freq());
-        if (dt < 67.67f) goto out;
+        float min_dt = is_bsp_live ? 33.0f : 16.0f;
+        if (dt < min_dt) goto out;
 
         int dx = point.x - g_mouse_state.down_location.x;
         int dy = point.y - g_mouse_state.down_location.y;
         if (abs(dx) < 2 && abs(dy) < 2) goto out;
 
-        struct view *view = window_manager_find_managed_window(&g_window_manager, g_mouse_state.window);
-        if (view && view->layout == VIEW_BSP) {
+        if (is_bsp_live) {
             uint8_t direction = 0;
             if (dx != 0) {
                 if (g_mouse_state.direction & HANDLE_LEFT)  direction |= HANDLE_LEFT;
@@ -1410,6 +2153,8 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
 
         g_mouse_state.last_moved_time = event_time;
         g_mouse_state.down_location = point;
+        g_mouse_state.resize_applied = true;
+        goto out;
     }
 
     struct view *src_view = window_manager_find_managed_window(&g_window_manager, g_mouse_state.window);
@@ -1459,6 +2204,16 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
             case MOUSE_DROP_ACTION_NONE: {
                 /* silence compiler warning.. */
             } break;
+            }
+
+            //
+            // NOTE: a space with the stack layout always stacks the dropped window
+            // onto its root node, regardless of which edge was targeted, so the
+            // feedback should cover the entire node instead of suggesting a split.
+            //
+
+            if (insert_dir && dst_view->layout == VIEW_STACK) {
+                insert_dir = STACK;
             }
 
             if (b_node->insert_dir != insert_dir) {
@@ -1594,6 +2349,7 @@ out:
 static EVENT_HANDLER(MISSION_CONTROL_SHOW_ALL_WINDOWS)
 {
     debug("%s:\n", __FUNCTION__);
+    mission_control_record_state();
     g_mission_control_mode = MISSION_CONTROL_MODE_SHOW_ALL_WINDOWS;
     event_signal_push(SIGNAL_MISSION_CONTROL_ENTER, (void*)(uintptr_t)g_mission_control_mode);
 }
@@ -1601,6 +2357,7 @@ static EVENT_HANDLER(MISSION_CONTROL_SHOW_ALL_WINDOWS)
 static EVENT_HANDLER(MISSION_CONTROL_SHOW_FRONT_WINDOWS)
 {
     debug("%s:\n", __FUNCTION__);
+    mission_control_record_state();
     g_mission_control_mode = MISSION_CONTROL_MODE_SHOW_FRONT_WINDOWS;
     event_signal_push(SIGNAL_MISSION_CONTROL_ENTER, (void*)(uintptr_t)g_mission_control_mode);
 }
@@ -1608,6 +2365,7 @@ static EVENT_HANDLER(MISSION_CONTROL_SHOW_FRONT_WINDOWS)
 static EVENT_HANDLER(MISSION_CONTROL_SHOW_DESKTOP)
 {
     debug("%s:\n", __FUNCTION__);
+    mission_control_record_state();
     g_mission_control_mode = MISSION_CONTROL_MODE_SHOW_DESKTOP;
     event_signal_push(SIGNAL_MISSION_CONTROL_ENTER, (void*)(uintptr_t)g_mission_control_mode);
 }
@@ -1615,6 +2373,7 @@ static EVENT_HANDLER(MISSION_CONTROL_SHOW_DESKTOP)
 static EVENT_HANDLER(MISSION_CONTROL_ENTER)
 {
     debug("%s:\n", __FUNCTION__);
+    mission_control_record_state();
     g_mission_control_mode = MISSION_CONTROL_MODE_SHOW;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1f * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -1626,6 +2385,77 @@ static EVENT_HANDLER(MISSION_CONTROL_ENTER)
 
 static EVENT_HANDLER(MISSION_CONTROL_CHECK_FOR_EXIT)
 {
+    if (workspace_is_macos_monterey() ||
+        workspace_is_macos_ventura() ||
+        workspace_is_macos_sonoma() ||
+        workspace_is_macos_sequoia() ||
+        (workspace_is_macos_tahoe() || workspace_is_macos_goldengate())) {
+        //
+        // NOTE: The Dock does not always report that Mission Control closed (e.g. when cancelled with escape),
+        // and mission_control_is_active() only checks the window list when an event asks for it. Until then
+        // every application activation is ignored as happening inside Mission Control, and we stay on the
+        // space that Mission Control previewed. Keep checking, so that the exit is posted as soon as it closes.
+        //
+
+        //
+        // NOTE: Also posted after a vertical swipe, to notice that Mission Control opened without waiting for an event.
+        //
+
+        if (g_mission_control_mode == MISSION_CONTROL_MODE_INACTIVE) {
+            mission_control_is_active();
+            return;
+        }
+
+        //
+        // NOTE: Several checks can be scheduled at once (enter event, swipe), keep only one of them polling.
+        //
+
+        static uint64_t last_poll_time;
+        uint64_t poll_time = read_os_timer();
+        if (poll_time > last_poll_time && (poll_time - last_poll_time) / 1000000ULL < 80) return;
+        last_poll_time = poll_time;
+
+        //
+        // NOTE: Remember the window under the cursor, so that leaving Mission Control with a gesture can select it.
+        //
+
+        CGEventRef cursor_event = CGEventCreate(NULL);
+        CGPoint cursor = CGEventGetLocation(cursor_event);
+        CFRelease(cursor_event);
+
+        //
+        // NOTE: The thumbnails start moving away as soon as the closing gesture begins, while the cursor stays put.
+        // Keep the window found at this cursor position instead of replacing it with whatever is there by then.
+        //
+
+        static CGPoint hover_cursor;
+        float dx = cursor.x - g_mission_control_enter_cursor.x;
+        float dy = cursor.y - g_mission_control_enter_cursor.y;
+        float hx = cursor.x - hover_cursor.x;
+        float hy = cursor.y - hover_cursor.y;
+        uint32_t last_hover_wid = __atomic_load_n(&g_mission_control_hover_wid, __ATOMIC_RELAXED);
+
+        if (dx*dx + dy*dy >= 20.0f*20.0f) {
+            __atomic_store_n(&g_mission_control_cursor_moved, true, __ATOMIC_RELEASE);
+        }
+
+        if (!last_hover_wid || hx*hx + hy*hy >= 4.0f*4.0f) {
+            uint64_t shown_sid = display_space_id(display_manager_point_display_id(cursor));
+            uint32_t hover_wid = workspace_mission_control_window_at_point(cursor, shown_sid);
+            if (hover_wid != last_hover_wid) {
+                debug("%s: window under the cursor %d\n", __FUNCTION__, hover_wid);
+            }
+            __atomic_store_n(&g_mission_control_hover_wid, hover_wid, __ATOMIC_RELEASE);
+            hover_cursor = cursor;
+        }
+
+        mission_control_is_active();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1f * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            event_loop_post(&g_event_loop, MISSION_CONTROL_CHECK_FOR_EXIT, NULL, 0);
+        });
+        return;
+    }
+
     if (!mission_control_is_active()) return;
 
     CFArrayRef window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, 0);
@@ -1671,6 +2501,9 @@ static EVENT_HANDLER(MISSION_CONTROL_EXIT)
 {
     debug("%s:\n", __FUNCTION__);
 
+    uint64_t exit_now = read_os_timer();
+    __atomic_store_n(&g_mission_control_exit_time, exit_now, __ATOMIC_RELEASE);
+
     if (g_window_manager.menubar_opacity != 1.0f) {
         float alpha = space_is_fullscreen(g_space_manager.current_space_id) ? 1.0f : g_window_manager.menubar_opacity;
         SLSSetMenuBarInsetAndAlpha(g_connection, 0, 1, alpha);
@@ -1682,6 +2515,137 @@ static EVENT_HANDLER(MISSION_CONTROL_EXIT)
 
     event_signal_push(SIGNAL_MISSION_CONTROL_EXIT, (void*)(uintptr_t)g_mission_control_mode);
     g_mission_control_mode = MISSION_CONTROL_MODE_INACTIVE;
+    extern volatile bool g_mission_control_posted_exit;
+    __atomic_store_n(&g_mission_control_posted_exit, false, __ATOMIC_RELEASE);
+
+    bool mouse_clicked = __atomic_load_n(&g_mission_control_mouse_clicked, __ATOMIC_RELAXED);
+
+    //
+    // NOTE: Leaving Mission Control with a gesture while the cursor is on a window selects that window,
+    // instead of returning to the window that was focused before Mission Control. Escape still cancels.
+    //
+
+    uint32_t hover_wid = __atomic_load_n(&g_mission_control_hover_wid, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_mission_control_hover_wid, 0, __ATOMIC_RELEASE);
+
+    uint64_t exit_gesture_time = __atomic_load_n(&__last_gesture_time, __ATOMIC_RELAXED);
+    uint64_t dt_exit_gesture_ms = (exit_now > exit_gesture_time) ? (exit_now - exit_gesture_time) / 1000000ULL : 0;
+    bool exit_via_gesture = dt_exit_gesture_ms < 800 || __atomic_load_n(&__pending_gesture, __ATOMIC_RELAXED);
+
+    //
+    // When Mission Control opens, macOS may show another space by itself. A window on that space under a resting
+    // cursor is not a choice the user made, so windows on other spaces need the cursor to have moved.
+    //
+
+    if (!mouse_clicked && exit_via_gesture && hover_wid && hover_wid != __atomic_load_n(&g_mission_control_prev_wid, __ATOMIC_RELAXED)) {
+        struct window *hover_window = window_manager_find_window(&g_window_manager, hover_wid);
+        uint64_t hover_sid = hover_window ? window_space(hover_window->id) : 0;
+        bool cursor_moved = __atomic_load_n(&g_mission_control_cursor_moved, __ATOMIC_RELAXED);
+        bool on_prev_space = hover_sid == __atomic_load_n(&g_mission_control_prev_sid, __ATOMIC_RELAXED);
+
+        if (hover_window && hover_sid && space_is_user(hover_sid) && (on_prev_space || cursor_moved)) {
+            debug("%s: selecting window %s %d on space %lld under the cursor\n", __FUNCTION__, hover_window->application->name, hover_window->id, hover_sid);
+            __atomic_store_n(&g_mission_control_prev_wid, hover_window->id, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_prev_pid, hover_window->application->pid, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_mission_control_prev_sid, hover_sid, __ATOMIC_RELEASE);
+        }
+    }
+
+    uint32_t prev_wid = __atomic_load_n(&g_mission_control_prev_wid, __ATOMIC_RELAXED);
+    uint64_t prev_sid = __atomic_load_n(&g_mission_control_prev_sid, __ATOMIC_RELAXED);
+
+    void (^restore_focus)(void) = ^{
+        uint64_t current_sid = space_manager_active_space();
+        uint64_t now = read_os_timer();
+        uint64_t last_gesture_time = __atomic_load_n(&__last_gesture_time, __ATOMIC_RELAXED);
+        uint64_t dt_gesture_ms = (now > last_gesture_time) ? (now - last_gesture_time) / 1000000ULL : 0;
+        bool exited_via_gesture = dt_gesture_ms < 800 || __atomic_load_n(&__pending_gesture, __ATOMIC_RELAXED);
+        bool is_cancellation = !mouse_clicked;
+
+        //
+        // NOTE: A click in Mission Control selects a window, also one on the current space. Only restore the
+        // previous window when Mission Control was cancelled (escape, gesture or hotkey without a click).
+        //
+
+        if (prev_sid && is_cancellation) {
+            if (current_sid != prev_sid) {
+                debug("%s: returning from previewed space %lld to original space %lld (gesture=%d, clicked=%d)\n",
+                      __FUNCTION__, current_sid, prev_sid, exited_via_gesture, mouse_clicked);
+                space_manager_focus_space(prev_sid);
+                current_sid = prev_sid;
+            }
+
+            struct view *view = space_manager_find_view(&g_space_manager, current_sid);
+            if (view_is_invalid(view)) {
+                view_update(view);
+            }
+
+            struct window *restore_window = NULL;
+            if (prev_wid) {
+                struct window *prev_window = window_manager_find_window(&g_window_manager, prev_wid);
+                if (prev_window && !window_check_flag(prev_window, WINDOW_MINIMIZE)) {
+                    uint64_t win_sid = window_space(prev_window->id);
+                    if (win_sid == current_sid || window_is_sticky(prev_window->id)) {
+                        restore_window = prev_window;
+                    }
+                }
+            }
+
+            if (!restore_window) {
+                restore_window = window_manager_find_window_on_space_by_rank_filtering_window(&g_window_manager, current_sid, 1, 0);
+            }
+
+            if (restore_window) {
+                debug("%s: restoring focus to previous window %s %d on space %lld\n", __FUNCTION__, restore_window->application->name, restore_window->id, current_sid);
+                // NOTE: read before the raise, which can already change what the application reports.
+                uint32_t old_key_ids[2] = {
+                    application_focused_window(restore_window->application),
+                    psn_equals(&g_window_manager.focused_window_psn, &restore_window->application->psn) ? g_window_manager.focused_window_id : 0
+                };
+
+                SLSSpaceSetFrontPSN(g_connection, current_sid, restore_window->application->psn);
+                window_manager_focus_window_with_raise(&restore_window->application->psn, restore_window->id, restore_window->ref);
+
+                //
+                // NOTE: Only escape hands the key window back by itself. After a gesture the application is
+                // in front, but without a key window, so the keyboard reaches nothing until the next click.
+                //
+
+                window_manager_transfer_key_window(&restore_window->application->psn, restore_window->id, old_key_ids);
+
+                g_process_manager.last_front_pid = g_process_manager.front_pid;
+                g_process_manager.front_pid = restore_window->application->pid;
+                g_window_manager.last_window_id = g_window_manager.focused_window_id;
+                g_window_manager.focused_window_id = restore_window->id;
+                g_window_manager.focused_window_psn = restore_window->application->psn;
+                event_signal_push(SIGNAL_WINDOW_FOCUSED, restore_window);
+            } else {
+                _SLPSSetFrontProcessWithOptions(&g_process_manager.finder_psn, 0, kCPSNoWindows);
+            }
+        }
+    };
+
+    restore_focus();
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.15f * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        restore_focus();
+    });
+
+    //
+    // NOTE: When a window was clicked in Mission Control, the space change to its space arrived while Mission Control
+    // was still active and was ignored. Process it now, so that the current space is not left stale.
+    //
+
+    if (mouse_clicked && space_manager_active_space() != g_space_manager.current_space_id) {
+        event_loop_post(&g_event_loop, SPACE_CHANGED, NULL, 0);
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.6f * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        __atomic_store_n(&g_mission_control_prev_wid, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_mission_control_prev_sid, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_mission_control_prev_pid, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_mission_control_mouse_clicked, false, __ATOMIC_RELEASE);
+    });
 }
 
 static EVENT_HANDLER(DOCK_DID_RESTART)
@@ -1700,30 +2664,22 @@ static EVENT_HANDLER(DOCK_DID_RESTART)
     event_signal_push(SIGNAL_DOCK_DID_RESTART, NULL);
 }
 
-static enum ffm_mode ffm_value;
-static int is_menu_open = 0;
-
 static EVENT_HANDLER(MENU_OPENED)
 {
-    debug("%s\n", __FUNCTION__);
-    ++is_menu_open;
+    struct application *application = window_manager_find_application(&g_window_manager, (pid_t)(intptr_t) context);
+    if (!application) return;
 
-    if (is_menu_open == 1) {
-        ffm_value = g_window_manager.ffm_mode;
-        g_window_manager.ffm_mode = FFM_DISABLED;
-    }
+    debug("%s: %s (%d)\n", __FUNCTION__, application->name, application->pid);
+    set_open_menus(application, application->open_menus + 1);
 }
 
 static EVENT_HANDLER(MENU_CLOSED)
 {
-    debug("%s\n", __FUNCTION__);
-    --is_menu_open;
+    struct application *application = window_manager_find_application(&g_window_manager, (pid_t)(intptr_t) context);
+    if (!application || !application->open_menus) return;
 
-    if (is_menu_open == 0) {
-        g_window_manager.ffm_mode = ffm_value;
-    } else if (is_menu_open < 0) {
-        is_menu_open = 0;
-    }
+    debug("%s: %s (%d)\n", __FUNCTION__, application->name, application->pid);
+    set_open_menus(application, application->open_menus - 1);
 }
 
 static EVENT_HANDLER(MENU_BAR_HIDDEN_CHANGED)
@@ -1753,6 +2709,8 @@ static EVENT_HANDLER(SYSTEM_WOKE)
     event_signal_push(SIGNAL_SYSTEM_WOKE, NULL);
 }
 
+#define DAEMON_MESSAGE_MAX_LENGTH (1 << 20)
+
 static EVENT_HANDLER(DAEMON_MESSAGE)
 {
     TIME_FUNCTION;
@@ -1761,8 +2719,16 @@ static EVENT_HANDLER(DAEMON_MESSAGE)
     int bytes_read    = 0;
     int bytes_to_read = 0;
 
-    if (read(param1, &bytes_to_read, sizeof(int)) == sizeof(int)) {
-        char *message = ts_alloc_unaligned(bytes_to_read);
+    //
+    // NOTE: the length comes from the client. A message is at least one empty
+    // token and its terminator, and anything larger than DAEMON_MESSAGE_MAX_LENGTH
+    // is refused rather than allowed to run out the temporary storage.
+    //
+
+    if (read(param1, &bytes_to_read, sizeof(int)) == sizeof(int) && bytes_to_read >= 2 && bytes_to_read <= DAEMON_MESSAGE_MAX_LENGTH) {
+        char *message = ts_alloc_unaligned(bytes_to_read + 2);
+        message[bytes_to_read + 0] = '\0';
+        message[bytes_to_read + 1] = '\0';
 
         do {
             int cur_read = read(param1, message+bytes_read, bytes_to_read-bytes_read);
@@ -1802,8 +2768,22 @@ static void *event_loop_run(void *context)
                 next = __atomic_load_n(&head->next, __ATOMIC_RELAXED);
                 if (!next) goto empty;
             } while (!__sync_bool_compare_and_swap(&event_loop->head, head, next));
+            __atomic_sub_fetch(&event_loop->count, 1, __ATOMIC_RELEASE);
 
-            switch (__atomic_load_n(&next->type, __ATOMIC_RELAXED)) {
+            enum event_type type = __atomic_load_n(&next->type, __ATOMIC_RELAXED);
+            if (type == MOUSE_DRAGGED || type == MOUSE_MOVED) {
+                struct event *peek;
+                while ((peek = __atomic_load_n(&next->next, __ATOMIC_RELAXED)) != NULL) {
+                    if (__atomic_load_n(&peek->type, __ATOMIC_RELAXED) != type) break;
+                    if (!__sync_bool_compare_and_swap(&event_loop->head, next, peek)) break;
+                    __atomic_sub_fetch(&event_loop->count, 1, __ATOMIC_RELEASE);
+                    void *old_context = __atomic_load_n(&next->context, __ATOMIC_RELAXED);
+                    if (old_context) CFRelease(old_context);
+                    next = peek;
+                }
+            }
+
+            switch (type) {
 #define EVENT_TYPE_ENTRY(value) case value: EVENT_HANDLER_##value(__atomic_load_n(&next->context, __ATOMIC_RELAXED), __atomic_load_n(&next->param1, __ATOMIC_RELAXED)); break;
                 EVENT_TYPE_LIST
 #undef EVENT_TYPE_ENTRY
@@ -1823,10 +2803,49 @@ empty:
     return NULL;
 }
 
+//
+// NOTE: events live in a ring of fixed slots that memory_pool_push hands out in
+// turn, and the ring wraps around without knowing which slots the event loop has
+// not handled yet. Every event takes a slot from count before it is pushed and
+// gives it back once the event loop moves past it, so a full ring never reuses
+// the slot of a waiting event. The slot of the event the event loop moved past
+// last, and the slack where the ring wraps, are kept free.
+//
+// When the ring is full a poster waits for room, except on the event loop
+// thread, which would wait for itself, and on the event tap thread, which the
+// event loop joins when the mouse handler is restarted. There the event is
+// dropped; the mouse events posted from the event tap give their retained event
+// back, other contexts are given up.
+//
+
+static bool event_loop_take_slot(struct event_loop *event_loop)
+{
+    uint64_t limit = event_loop->pool.size / sizeof(struct event) - 4;
+    pthread_t self = pthread_self();
+    bool can_wait = !pthread_equal(self, event_loop->thread) && !pthread_equal(self, g_mouse_state.thread);
+
+    for (;;) {
+        uint64_t count = __atomic_load_n(&event_loop->count, __ATOMIC_ACQUIRE);
+        if (count < limit) {
+            if (__sync_bool_compare_and_swap(&event_loop->count, count, count + 1)) return true;
+            continue;
+        }
+
+        if (!can_wait) return false;
+        usleep(1000);
+    }
+}
+
 void event_loop_post(struct event_loop *event_loop, enum event_type type, void *context, int param1)
 {
     bool success;
     struct event *tail, *new_tail;
+
+    if (!event_loop_take_slot(event_loop)) {
+        debug("%s: event queue is full, dropping event %d..\n", __FUNCTION__, type);
+        if (context && (type == MOUSE_DOWN || type == MOUSE_UP || type == MOUSE_DRAGGED || type == MOUSE_MOVED)) CFRelease(context);
+        return;
+    }
 
     new_tail = memory_pool_push(&event_loop->pool, sizeof(struct event));
     __atomic_store_n(&new_tail->type, type, __ATOMIC_RELEASE);

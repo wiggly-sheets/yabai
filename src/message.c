@@ -28,6 +28,7 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_WINDOW_PLACEMENT      "window_placement"
 #define COMMAND_CONFIG_WINDOW_INSERT_POINT   "window_insertion_point"
 #define COMMAND_CONFIG_WINDOW_ZOOM_PERSIST   "window_zoom_persist"
+#define COMMAND_CONFIG_WINDOW_NATIVE_TABS    "window_native_tabs"
 #define COMMAND_CONFIG_OPACITY               "window_opacity"
 #define COMMAND_CONFIG_OPACITY_DURATION      "window_opacity_duration"
 #define COMMAND_CONFIG_ANIMATION_DURATION    "window_animation_duration"
@@ -57,10 +58,15 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_MOUSE_EDGE_RESIZE     "mouse_edge_resize"
 #define COMMAND_CONFIG_ADAPTIVE_RESIZE       "adaptive_resize"
 #define COMMAND_CONFIG_FOCUS_LOOP            "focus_loop"
+#define COMMAND_CONFIG_MOUSE_BSP_LIVE_RESIZE "mouse_bsp_live_resize"
+#define COMMAND_CONFIG_MOUSE_LIVE_RESIZE     "mouse_live_resize"
 #define COMMAND_CONFIG_EXTERNAL_BAR          "external_bar"
 #define COMMAND_CONFIG_SKIP_SPACE_ANIMATION  "skip_window_focus_animation"
+#define COMMAND_CONFIG_SPACE_GESTURE_NATURAL_SCROLLING "space_gesture_natural_scrolling"
 
 #define SELECTOR_CONFIG_SPACE                "--space"
+
+#define ARGUMENT_CONFIG_NATURAL_SCROLLING_AUTO "auto"
 
 #define ARGUMENT_CONFIG_FFM_AUTOFOCUS         "autofocus"
 #define ARGUMENT_CONFIG_FFM_AUTORAISE         "autoraise"
@@ -1288,6 +1294,21 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }
+        } else if (token_equals(command, COMMAND_CONFIG_WINDOW_NATIVE_TABS)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_window_manager.window_native_tabs]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                g_window_manager.window_native_tabs = false;
+                window_manager_release_tab_members(&g_window_manager);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                if (!g_window_manager.window_native_tabs) {
+                    g_window_manager.window_native_tabs = true;
+                    window_manager_add_existing_tabs(&g_space_manager, &g_window_manager);
+                }
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
         } else if (token_equals(command, COMMAND_CONFIG_SKIP_SPACE_ANIMATION)) {
             struct token value = get_token(&message);
             if (!token_is_valid(value)) {
@@ -1296,6 +1317,19 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                 g_space_manager.skip_window_focus_animation = false;
             } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
                 g_space_manager.skip_window_focus_animation = true;
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_SPACE_GESTURE_NATURAL_SCROLLING)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", space_gesture_natural_scrolling_str[g_space_manager.gesture_natural_scrolling]);
+            } else if (token_equals(value, ARGUMENT_CONFIG_NATURAL_SCROLLING_AUTO)) {
+                g_space_manager.gesture_natural_scrolling = SPACE_GESTURE_NATURAL_SCROLL_AUTO;
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                g_space_manager.gesture_natural_scrolling = SPACE_GESTURE_NATURAL_SCROLL_ON;
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                g_space_manager.gesture_natural_scrolling = SPACE_GESTURE_NATURAL_SCROLL_OFF;
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }
@@ -1812,6 +1846,19 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                 g_window_manager.focus_loop = false;
             } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
                 g_window_manager.focus_loop = true;
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_MOUSE_BSP_LIVE_RESIZE) || token_equals(command, COMMAND_CONFIG_MOUSE_LIVE_RESIZE)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_window_manager.adaptive_resize]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                g_window_manager.adaptive_resize = true;
+                g_mouse_state.bsp_live_resize = true;
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                g_window_manager.adaptive_resize = false;
+                g_mouse_state.bsp_live_resize = false;
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }
@@ -3257,6 +3304,16 @@ static void *message_loop_run(void *context)
     while (g_message_loop.is_running) {
         int sockfd = accept(g_message_loop.sockfd, NULL, 0);
         if (sockfd == -1) continue;
+
+        //
+        // NOTE: the message is read, and the response written, on the event loop
+        // thread. A client that stops sending or reading would otherwise hold
+        // up all window management until it goes away.
+        //
+
+        struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 };
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
         event_loop_post(&g_event_loop, DAEMON_MESSAGE, NULL, sockfd);
     }

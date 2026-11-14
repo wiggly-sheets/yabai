@@ -175,10 +175,19 @@ Global Settings
 *window_zoom_persist* ['<BOOL_SEL>']::
     Windows will keep their zoom-state through layout changes.
 
+*window_native_tabs* ['<BOOL_SEL>']::
+    Keep the native macOS tabs of an application (Terminal, Finder, Ghostty) in a single tile. Disabled by default. +
+    Only the selected tab takes part in the layout, so opening, switching and closing tabs leaves it alone. A tab dragged out of the tab bar becomes its own tile, and a tab dragged into another window joins that group.
+
 *skip_window_focus_animation* ['<BOOL_SEL>']::
     Bypass macOS space animation when an application or window on an inactive space is focused. +
     You should only enable this if you do NOT use the scripting addition. +
     The scripting addition implements the same functionality in a more robust way.
+
+*space_gesture_natural_scrolling* ['auto|on|off']::
+    Specify the trackpad swipe scroll direction when synthesizing space switching gestures without the scripting-addition. +
+    When set to 'auto', yabai automatically detects whether macOS Natural Scrolling is enabled in system preferences. +
+    When set to 'off', swipe velocity direction is inverted to match classic non-natural scrolling.
 
 *window_shadow* ['<BOOL_SEL>|float']::
     Draw shadow for windows. +
@@ -243,6 +252,10 @@ Global Settings
 *adaptive_resize* ['on|off']::     Enable or disable live BSP grid resize during mouse drag. When enabled, resizing a window in a bsp layout dynamically adjusts the split ratios of sibling windows in real time. When disabled (default), only the dragged window resizes during the drag; the bsp grid is reconciled against the final frame on mouse-up. Defaults to 'off'.
 
 *focus_loop* ['on|off']::     Enable or disable wrap-around focus movement in scroll and accordion layouts. Defaults to 'on'.
+
+*mouse_bsp_live_resize* ['on|off']::
+    Specify whether resizing a tiled BSP window with the mouse adjusts sibling window borders in real time ('on') or only upon mouse release ('off', classic yabai behavior). +
+    Default: 'on'.
 
 Space Settings
 ^^^^^^^^^^^^^^

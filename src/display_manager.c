@@ -200,6 +200,7 @@ CFStringRef display_manager_arrangement_display_uuid(int arrangement)
 {
     CFStringRef result = NULL;
     CFArrayRef displays = SLSCopyManagedDisplays(g_connection);
+    if (!displays) return NULL;
 
     int count = CFArrayGetCount(displays);
     int index = arrangement - 1;
@@ -390,8 +391,11 @@ bool display_manager_display_is_animating(uint32_t did)
 
 int display_manager_active_display_count(void)
 {
-    uint32_t count;
+    uint32_t count = 0;
     CGGetActiveDisplayList(0, NULL, &count);
+    if (!count) {
+        CGGetOnlineDisplayList(0, NULL, &count);
+    }
     return (int)count;
 }
 
@@ -400,6 +404,9 @@ uint32_t *display_manager_active_display_list(int *count)
     int display_count = display_manager_active_display_count();
     uint32_t *result = ts_alloc_list(uint32_t, display_count);
     CGGetActiveDisplayList(display_count, result, (uint32_t*)count);
+    if (!*count) {
+        CGGetOnlineDisplayList(display_count, result, (uint32_t*)count);
+    }
     return result;
 }
 
@@ -411,7 +418,10 @@ static AXUIElementRef display_manager_find_element_at_point(CGPoint point)
 
     CFTypeRef role = NULL;
     AXUIElementCopyAttributeValue(element_ref, kAXRoleAttribute, &role);
-    if (!role) return NULL;
+    if (!role) {
+        CFRelease(element_ref);
+        return NULL;
+    }
 
     if (CFEqual(role, kAXWindowRole)) {
         CFRelease(role);
@@ -453,9 +463,14 @@ out:
 
 void display_manager_set_active_display_id(uint32_t did)
 {
+    if (did == g_display_manager.current_display_id) return;
+
     CFStringRef uuid = display_uuid(did);
+    if (!uuid) return;
+
     SLSSetActiveMenuBarDisplayIdentifier(g_connection, uuid, uuid);
     CFRelease(uuid);
+    g_display_manager.current_display_id = did;
 }
 
 #pragma clang diagnostic push
@@ -491,7 +506,13 @@ enum space_op_error display_manager_focus_space(uint32_t did, uint64_t sid)
     uint32_t space_did = space_display_id(sid);
     if (space_did != did) return SPACE_OP_ERROR_SAME_DISPLAY;
 
-    return scripting_addition_focus_space(sid) ? SPACE_OP_ERROR_SUCCESS : SPACE_OP_ERROR_SCRIPTING_ADDITION;
+    bool disable_sa = getenv("YABAI_DISABLE_SA") != NULL || getenv("YABAI_SIMULATE_SIP_ON") != NULL;
+    if (!disable_sa && scripting_addition_focus_space(sid)) {
+        return SPACE_OP_ERROR_SUCCESS;
+    }
+
+    space_manager_focus_space_using_gesture(did, sid);
+    return SPACE_OP_ERROR_SUCCESS;
 }
 
 bool display_manager_begin(struct display_manager *dm)

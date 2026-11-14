@@ -267,21 +267,19 @@ out:
     return result;
 }
 
-static uint32_t scripting_addition_required_attrib(void)
+static uint32_t scripting_addition_expected_attrib_for_version(NSOperatingSystemVersion os_version)
 {
-    NSOperatingSystemVersion os_version = [[NSProcessInfo processInfo] operatingSystemVersion];
-
-    //
-    // NOTE: macOS 27.2 removed DPDesktopPictureManager, the Dock-side moveSpace routine, and the
-    // CoreDockWindows message behind setFrontWindow, so there is nothing left in Dock to resolve.
-    // Moving spaces between displays is unavailable there; setFrontWindow is not used by yabai.
-    //
-
-    if (os_version.majorVersion == 27 && os_version.minorVersion >= 2) {
-        return OSAX_ATTRIB_ALL & ~(OSAX_ATTRIB_DPPM | OSAX_ATTRIB_MOV_SPACE | OSAX_ATTRIB_SET_WINDOW);
+    if (os_version.majorVersion > 27 || (os_version.majorVersion == 27 && os_version.minorVersion >= 2)) {
+        return OSAX_ATTRIB_REDUCED;
     }
 
     return OSAX_ATTRIB_ALL;
+}
+
+static uint32_t scripting_addition_expected_attrib(void)
+{
+    NSOperatingSystemVersion os_version = [[NSProcessInfo processInfo] operatingSystemVersion];
+    return scripting_addition_expected_attrib_for_version(os_version);
 }
 
 static int scripting_addition_perform_validation(void)
@@ -296,8 +294,8 @@ static int scripting_addition_perform_validation(void)
     }
 
     if (string_equals(version, OSAX_VERSION)) {
-        uint32_t required = scripting_addition_required_attrib();
-        if ((attrib & required) == required) {
+        uint32_t expected_attrib = scripting_addition_expected_attrib();
+        if ((attrib & expected_attrib) == expected_attrib) {
             notify("scripting-addition", "payload v%s", version);
             return 0;
         }
@@ -437,6 +435,16 @@ out:
 #define pack(v) memcpy(bytes+length, &v, sizeof(v)); length += sizeof(v)
 #define sa_payload_send(op) *(int16_t*)bytes = length-sizeof(length), bytes[sizeof(length)] = op, scripting_addition_send_bytes(bytes, length)
 
+//
+// NOTE: a payload fits in one SA_SOCKET_BUFF_LEN buffer, after the length and the
+// opcode. A list too long for that is sent in several messages of at most the
+// given number of entries; the Dock handles each entry on its own.
+//
+#define SA_PAYLOAD_SPACE(fixed) (SA_SOCKET_BUFF_LEN - (int)(sizeof(int16_t) + 1) - (int)(fixed))
+#define SA_SWAP_PROXY_MAX_COUNT SA_PAYLOAD_SPACE(sizeof(int)) / (int)(2 * sizeof(uint32_t))
+#define SA_ORDER_IN_MAX_COUNT SA_PAYLOAD_SPACE(sizeof(int)) / (int)sizeof(uint32_t)
+#define SA_LIST_TO_SPACE_MAX_COUNT SA_PAYLOAD_SPACE(sizeof(uint64_t) + sizeof(int)) / (int)sizeof(uint32_t)
+
 static bool scripting_addition_send_bytes(char *bytes, int length)
 {
     int sockfd;
@@ -478,8 +486,24 @@ bool scripting_addition_destroy_space(uint64_t sid)
     return sa_payload_send(SA_OPCODE_SPACE_DESTROY);
 }
 
+//
+// NOTE: The payload ignores a space move when it has no way to move spaces on this macOS version,
+// but the socket write itself still succeeds. Ask for the supported attributes first, so that we can report failure.
+//
+
+static bool scripting_addition_can_move_space(void)
+{
+    uint32_t attrib = 0;
+    char version[SA_SOCKET_BUFF_LEN] = {0};
+    if (!scripting_addition_request_handshake(version, &attrib)) return false;
+
+    return attrib & OSAX_ATTRIB_MOV_SPACE;
+}
+
 bool scripting_addition_move_space_to_display(uint64_t src_sid, uint64_t dst_sid, uint64_t src_prev_sid, bool focus)
 {
+    if (!scripting_addition_can_move_space()) return false;
+
     sa_payload_init();
     pack(src_sid);
     pack(dst_sid);
@@ -490,6 +514,8 @@ bool scripting_addition_move_space_to_display(uint64_t src_sid, uint64_t dst_sid
 
 bool scripting_addition_move_space_after_space(uint64_t src_sid, uint64_t dst_sid, bool focus)
 {
+    if (!scripting_addition_can_move_space()) return false;
+
     uint64_t dummy_sid = 0;
     sa_payload_init();
     pack(src_sid);
@@ -562,33 +588,51 @@ bool scripting_addition_scale_window(uint32_t wid, float x, float y, float w, fl
 bool scripting_addition_swap_window_proxy_in(struct window_animation *animation_list, int animation_count)
 {
     uint32_t dummy_wid = 0;
-    sa_payload_init();
-    pack(animation_count);
-    for (int i = 0; i < animation_count; ++i) {
-        if (__atomic_load_n(&animation_list[i].skip, __ATOMIC_RELAXED)) {
-            pack(dummy_wid);
-        } else {
-            pack(animation_list[i].wid);
-            pack(animation_list[i].proxy.id);
+    bool result = true;
+    int start = 0;
+
+    do {
+        int count = min(animation_count - start, SA_SWAP_PROXY_MAX_COUNT);
+        sa_payload_init();
+        pack(count);
+        for (int i = start; i < start + count; ++i) {
+            if (__atomic_load_n(&animation_list[i].skip, __ATOMIC_RELAXED)) {
+                pack(dummy_wid);
+            } else {
+                pack(animation_list[i].wid);
+                pack(animation_list[i].proxy.id);
+            }
         }
-    }
-    return sa_payload_send(SA_OPCODE_WINDOW_SWAP_PROXY_IN);
+        result &= (sa_payload_send(SA_OPCODE_WINDOW_SWAP_PROXY_IN));
+        start += count;
+    } while (start < animation_count);
+
+    return result;
 }
 
 bool scripting_addition_swap_window_proxy_out(struct window_animation *animation_list, int animation_count)
 {
     uint32_t dummy_wid = 0;
-    sa_payload_init();
-    pack(animation_count);
-    for (int i = 0; i < animation_count; ++i) {
-        if (__atomic_load_n(&animation_list[i].skip, __ATOMIC_RELAXED)) {
-            pack(dummy_wid);
-        } else {
-            pack(animation_list[i].wid);
-            pack(animation_list[i].proxy.id);
+    bool result = true;
+    int start = 0;
+
+    do {
+        int count = min(animation_count - start, SA_SWAP_PROXY_MAX_COUNT);
+        sa_payload_init();
+        pack(count);
+        for (int i = start; i < start + count; ++i) {
+            if (__atomic_load_n(&animation_list[i].skip, __ATOMIC_RELAXED)) {
+                pack(dummy_wid);
+            } else {
+                pack(animation_list[i].wid);
+                pack(animation_list[i].proxy.id);
+            }
         }
-    }
-    return sa_payload_send(SA_OPCODE_WINDOW_SWAP_PROXY_OUT);
+        result &= (sa_payload_send(SA_OPCODE_WINDOW_SWAP_PROXY_OUT));
+        start += count;
+    } while (start < animation_count);
+
+    return result;
 }
 
 bool scripting_addition_order_window(uint32_t a_wid, int order, uint32_t b_wid)
@@ -605,29 +649,46 @@ bool scripting_addition_order_window_in(uint32_t *window_list, int window_count)
 {
     uint32_t dummy_wid = 0;
     uint8_t ordered_in = 0;
+    bool result = true;
+    int start = 0;
 
-    sa_payload_init();
-    pack(window_count);
-    for (int i = 0; i < window_count; ++i) {
-        SLSWindowIsOrderedIn(g_connection, window_list[i], &ordered_in);
-        if (ordered_in) {
-            pack(dummy_wid);
-        } else {
-            pack(window_list[i]);
+    do {
+        int count = min(window_count - start, SA_ORDER_IN_MAX_COUNT);
+        sa_payload_init();
+        pack(count);
+        for (int i = start; i < start + count; ++i) {
+            SLSWindowIsOrderedIn(g_connection, window_list[i], &ordered_in);
+            if (ordered_in) {
+                pack(dummy_wid);
+            } else {
+                pack(window_list[i]);
+            }
         }
-    }
-    return sa_payload_send(SA_OPCODE_WINDOW_ORDER_IN);
+        result &= (sa_payload_send(SA_OPCODE_WINDOW_ORDER_IN));
+        start += count;
+    } while (start < window_count);
+
+    return result;
 }
 
 bool scripting_addition_move_window_list_to_space(uint64_t sid, uint32_t *window_list, int window_count)
 {
-    sa_payload_init();
-    pack(sid);
-    pack(window_count);
-    for (int i = 0; i < window_count; ++i) {
-        pack(window_list[i]);
-    }
-    return sa_payload_send(SA_OPCODE_WINDOW_LIST_TO_SPACE);
+    bool result = true;
+    int start = 0;
+
+    do {
+        int count = min(window_count - start, SA_LIST_TO_SPACE_MAX_COUNT);
+        sa_payload_init();
+        pack(sid);
+        pack(count);
+        for (int i = start; i < start + count; ++i) {
+            pack(window_list[i]);
+        }
+        result &= (sa_payload_send(SA_OPCODE_WINDOW_LIST_TO_SPACE));
+        start += count;
+    } while (start < window_count);
+
+    return result;
 }
 
 bool scripting_addition_move_window_to_space(uint64_t sid, uint32_t wid)
@@ -641,3 +702,7 @@ bool scripting_addition_move_window_to_space(uint64_t sid, uint32_t wid)
 #undef sa_payload_init
 #undef pack
 #undef sa_payload_send
+#undef SA_PAYLOAD_SPACE
+#undef SA_SWAP_PROXY_MAX_COUNT
+#undef SA_ORDER_IN_MAX_COUNT
+#undef SA_LIST_TO_SPACE_MAX_COUNT
