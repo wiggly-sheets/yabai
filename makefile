@@ -4,7 +4,7 @@ CLI_FLAGS      =
 BUILD_FLAGS    = -std=c11 -Wall -Wextra -g -O0 -fvisibility=hidden -mmacosx-version-min=11.0 -fno-objc-arc -arch x86_64 -arch arm64 -sectcreate __TEXT __info_plist $(INFO_PLIST)
 BUILD_PATH     = ./bin
 PREFIX        ?= /opt/homebrew
-YABAI_CERT    ?= yabai-cert
+YABAI_CERT    ?= $(or $(shell security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1),yabai-cert)
 DOC_PATH       = ./doc
 SCRIPT_PATH    = ./scripts
 ASSET_PATH     = ./assets
