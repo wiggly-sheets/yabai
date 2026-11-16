@@ -90,8 +90,10 @@ ANGRY_TEST(parsesKeyValuePairExtractingKeyAndValueAndExclusion) {
     parse_key_value_pair(s2, &k2, &v2, &e2);
     ANGRY_ASSERT_ALL("parse_key_value_pair failed",
                      string_equals(k1, "app"),
+                     string_equals(v1, "Finder"),
                      !e1,
                      string_equals(k2, "title"),
+                     string_equals(v2, "Zoom"),
                      e2);
 }
 

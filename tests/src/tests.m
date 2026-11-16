@@ -253,10 +253,11 @@ NSString *NSHomeDirectoryForUser(NSString *userName)
 }
 
 //
-// NOTE: no process is ever spawned during the tests, so that a test of the
-// service commands can not reach the real launchd; the fake keeps the
-// command lines it was given in the same log as system().
+// NOTE: the service tests ask launchctl to load and unload the daemon. The fake
+// runs a child that exits with g_mock_spawn_status instead, so the tests never
+// touch the launchd state of the machine they run on.
 //
+static int g_mock_spawn_status;
 int posix_spawn(pid_t *restrict pid, const char *restrict path,
                 const posix_spawn_file_actions_t *file_actions,
                 const posix_spawnattr_t *restrict attrp,
@@ -267,7 +268,11 @@ int posix_spawn(pid_t *restrict pid, const char *restrict path,
         used += snprintf(g_mock_system_log + used, sizeof(g_mock_system_log) - used, i ? " %s" : "%s", argv[i]);
     }
     if (used < sizeof(g_mock_system_log) - 1) g_mock_system_log[used++] = '\n', g_mock_system_log[used] = '\0';
-    if (pid) *pid = 0;
+
+    pid_t child = fork();
+    if (child < 0) return errno;
+    if (child == 0) _exit(g_mock_spawn_status);
+    if (pid) *pid = child;
     return 0;
 }
 
@@ -1292,6 +1297,7 @@ static void tests_reset_shared_state(void)
     g_mock_uid = (uid_t)-1;
     g_mock_csr_config = -1;
     g_mock_system_log[0] = '\0';
+    g_mock_spawn_status = 0;
     g_mock_home = NULL;
     g_mock_front_process_count = 0;
     g_mock_front_process_wid = 0;

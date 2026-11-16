@@ -106,8 +106,8 @@ ANGRY_TEST(ignoresFencelessLiveResizeStepAfterSplitHasMoved)
     struct view view = { .layout = VIEW_BSP, .root = &root };
     table_add(&g_window_manager.managed_window, &win.id, &view);
 
-    bool saved_live_resize = g_mouse_state.bsp_live_resize;
-    g_mouse_state.bsp_live_resize = true;
+    bool saved_adaptive_resize = g_window_manager.adaptive_resize;
+    g_window_manager.adaptive_resize = true;
     g_mouse_state.window = &win;
     g_mouse_state.window_frame = win.frame;
     g_mouse_state.down_location = CGPointMake(300, 200);
@@ -124,7 +124,7 @@ ANGRY_TEST(ignoresFencelessLiveResizeStepAfterSplitHasMoved)
     g_mouse_state.window = NULL;
     g_mouse_state.live_resized = false;
     g_mouse_state.current_action = MOUSE_MODE_NONE;
-    g_mouse_state.bsp_live_resize = saved_live_resize;
+    g_window_manager.adaptive_resize = saved_adaptive_resize;
     table_remove(&g_window_manager.managed_window, &win.id);
     ANGRY_ASSERT(height == 300.0f, "expected a vertical step with no fence to leave the window alone once the split has moved");
 }

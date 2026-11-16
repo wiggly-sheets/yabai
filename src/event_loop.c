@@ -2123,25 +2123,16 @@ static EVENT_HANDLER(MOUSE_DRAGGED)
             }
 
             if (direction != 0) {
-                if (g_window_manager.adaptive_resize) {
-                    /* live drag must not spawn animation machinery per drag event */
-                    float animation_duration = g_window_manager.window_animation_duration;
-                    g_window_manager.window_animation_duration = 0.0f;
-                    enum window_op_error err = window_manager_resize_window_relative(&g_window_manager, g_mouse_state.window, direction, dx, dy, false);
-                    g_window_manager.window_animation_duration = animation_duration;
-                    if (err == WINDOW_OP_ERROR_SUCCESS) {
-                        g_mouse_state.live_resized = true;
-                    } else {
-                        /* free resize leaves the tile grid, so mouse-up must adjust it */
-                        g_mouse_state.live_resized = false;
-                        g_mouse_state.window->frame = window_ax_frame(g_mouse_state.window);
-                        window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, direction, dx, dy, false);
-                        g_mouse_state.window_frame = window_ax_frame(g_mouse_state.window);
-                    }
-                } else {
-                    /* adaptive resize disabled: move only the dragged window during the
-                     * drag and let mouse-up reconcile the BSP grid against the final frame */
-                    g_mouse_state.live_resized = false;
+                /* live drag must not spawn animation machinery per drag event */
+                float animation_duration = g_window_manager.window_animation_duration;
+                g_window_manager.window_animation_duration = 0.0f;
+                enum window_op_error err = window_manager_resize_window_relative(&g_window_manager, g_mouse_state.window, direction, dx, dy, false);
+                g_window_manager.window_animation_duration = animation_duration;
+                if (err == WINDOW_OP_ERROR_SUCCESS) {
+                    g_mouse_state.live_resized = true;
+                } else if (!g_mouse_state.live_resized) {
+                    /* Once a split has moved, the release skips the BSP adjustment,
+                     * so nothing would undo this resize. */
                     g_mouse_state.window->frame = window_ax_frame(g_mouse_state.window);
                     window_manager_resize_window_relative_internal(g_mouse_state.window, g_mouse_state.window->frame, direction, dx, dy, false);
                     g_mouse_state.window_frame = window_ax_frame(g_mouse_state.window);

@@ -418,11 +418,30 @@ ANGRY_TEST(restoresAlphaChannelInQuartzImage)
 
 ANGRY_TEST(formatsDebugMessageIteratingTokens)
 {
+    int fds[2];
+    pipe(fds);
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    dup2(fds[1], STDOUT_FILENO);
+    close(fds[1]);
+
     g_verbose = true;
     char msg[] = "token1\0token2\0\0";
     debug_message("dbg", msg);
     g_verbose = false;
-    ANGRY_ASSERT(msg[0] == 't', "expected debug_message to iterate tokens");
+
+    fflush(stdout);
+    dup2(saved, STDOUT_FILENO);
+    close(saved);
+
+    char out[64] = {0};
+    ssize_t len = read(fds[0], out, sizeof(out) - 1);
+    close(fds[0]);
+    if (len < 0) len = 0;
+    out[len] = '\0';
+
+    ANGRY_ASSERT(strcmp(out, "dbg: token1 token2\n") == 0,
+                 "expected debug_message to print the prefix followed by every token");
 }
 
 ANGRY_TEST(terminatesWithExitFailureOnError)
@@ -499,81 +518,119 @@ ANGRY_TEST(installsServiceInternalToFile)
                      ok);
 }
 
-ANGRY_TEST(removesLegacyServicePlist)
+//
+// NOTE: the service tests write into a throwaway home. LaunchAgents is two
+// levels deep and only the last level is created by the code under test, so
+// the fixture creates both and removes them again.
+//
+static void mock_home_begin(char *home, size_t size)
 {
-    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    snprintf(home, size, "/tmp/yabai_mock_home_XXXXXX");
     mkdtemp(home);
-    char dir[MAXLEN], plist[MAXLEN];
+
+    char dir[MAXLEN];
     snprintf(dir, sizeof(dir), "%s/Library", home);
     mkdir(dir, 0755);
     snprintf(dir, sizeof(dir), "%s/Library/LaunchAgents", home);
     mkdir(dir, 0755);
+
+    g_mock_home = home;
+}
+
+static void mock_home_end(char *home)
+{
+    char path[MAXLEN];
+    snprintf(path, sizeof(path), _PATH_YABAI_PLIST, home);
+    unlink(path);
+    snprintf(path, sizeof(path), _PATH_LEGACY_YABAI_PLIST, home);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/Library/LaunchAgents", home);
+    rmdir(path);
+    snprintf(path, sizeof(path), "%s/Library", home);
+    rmdir(path);
+    rmdir(home);
+    g_mock_home = NULL;
+}
+
+ANGRY_TEST(removesLegacyServicePlist)
+{
+    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    mock_home_begin(home, sizeof(home));
+
+    char plist[MAXLEN];
     snprintf(plist, sizeof(plist), _PATH_LEGACY_YABAI_PLIST, home);
     fclose(fopen(plist, "w"));
-    g_mock_home = home;
+
     service_cleanup_legacy();
     bool removed = !file_exists(plist);
-    unlink(plist);
-    rmdir(dir);
-    snprintf(dir, sizeof(dir), "%s/Library", home);
-    rmdir(dir);
-    rmdir(home);
+
+    mock_home_end(home);
     ANGRY_ASSERT(removed, "expected the legacy service plist to be removed");
 }
 
 ANGRY_TEST(installsLaunchdServiceToMockHomeDirectory)
 {
-    g_mock_home = "/tmp/yabai_mock_home";
+    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    mock_home_begin(home, sizeof(home));
+
     int res = service_install();
-    char *p = populate_plist_path();
-    unlink(p);
-    free(p);
-    g_mock_home = NULL;
+
+    mock_home_end(home);
     ANGRY_ASSERT(res == 0, "expected service_install to write service plist to mock home");
 }
 
 ANGRY_TEST(uninstallsLaunchdServiceFromMockHomeDirectory)
 {
-    g_mock_home = "/tmp/yabai_mock_home";
+    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    mock_home_begin(home, sizeof(home));
+
     char *p = populate_plist_path();
     FILE *f = fopen(p, "w"); if (f) fclose(f);
-    int res = service_uninstall();
     free(p);
-    g_mock_home = NULL;
+
+    int res = service_uninstall();
+
+    mock_home_end(home);
     ANGRY_ASSERT(res == 0, "expected service_uninstall to unlink service plist");
 }
 
 ANGRY_TEST(startsLaunchdServiceInMockEnvironment)
 {
-    g_mock_home = "/tmp/yabai_mock_home";
+    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    mock_home_begin(home, sizeof(home));
+
     int res = service_start();
-    char *p = populate_plist_path();
-    unlink(p);
-    free(p);
-    g_mock_home = NULL;
+
+    mock_home_end(home);
     ANGRY_ASSERT(res == 0, "expected service_start to bootstrap service");
 }
 
 ANGRY_TEST(restartsLaunchdServiceInMockEnvironment)
 {
-    g_mock_home = "/tmp/yabai_mock_home";
+    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    mock_home_begin(home, sizeof(home));
+
     char *p = populate_plist_path();
     FILE *f = fopen(p, "w"); if (f) fclose(f);
-    int res = service_restart();
-    unlink(p);
     free(p);
-    g_mock_home = NULL;
+
+    int res = service_restart();
+
+    mock_home_end(home);
     ANGRY_ASSERT(res == 0, "expected service_restart to kickstart service");
 }
 
 ANGRY_TEST(stopsLaunchdServiceInMockEnvironment)
 {
-    g_mock_home = "/tmp/yabai_mock_home";
+    char home[] = "/tmp/yabai_mock_home_XXXXXX";
+    mock_home_begin(home, sizeof(home));
+
     char *p = populate_plist_path();
     FILE *f = fopen(p, "w"); if (f) fclose(f);
-    int res = service_stop();
-    unlink(p);
     free(p);
-    g_mock_home = NULL;
+
+    int res = service_stop();
+
+    mock_home_end(home);
     ANGRY_ASSERT(res == 0, "expected service_stop to unload and disable service");
 }
