@@ -308,6 +308,53 @@ static void angry_tiled_pair_end(struct angry_tiled_pair *pair)
     pair->view->root = pair->saved_root;
 }
 
+ANGRY_TEST(wrapsFocusAcrossEndsOfLoopingLayout)
+{
+    struct angry_tiled_pair pair;
+    angry_tiled_pair_begin(&pair);
+    enum view_type saved_layout = pair.view->layout;
+    bool saved_loop = g_window_manager.focus_loop;
+    pair.view->layout = VIEW_SCROLL;
+    g_window_manager.focus_loop = true;
+
+    struct window *wrapped_next = window_manager_find_next_managed_window(&g_space_manager, &g_window_manager, &pair.large);
+    struct window *wrapped_prev = window_manager_find_prev_managed_window(&g_space_manager, &g_window_manager, &pair.small);
+    uint32_t next_wid = wrapped_next ? wrapped_next->id : 0;
+    uint32_t prev_wid = wrapped_prev ? wrapped_prev->id : 0;
+
+    pair.view->layout = saved_layout;
+    g_window_manager.focus_loop = saved_loop;
+    angry_tiled_pair_end(&pair);
+
+    ANGRY_ASSERT_ALL("focus must loop through the ends of a scroll layout",
+                     next_wid == pair.small.id,
+                     prev_wid == pair.large.id);
+}
+
+ANGRY_TEST(keepsFocusAtEndsOutsideLoopingLayoutOrWhenDisabled)
+{
+    struct angry_tiled_pair pair;
+    angry_tiled_pair_begin(&pair);
+    enum view_type saved_layout = pair.view->layout;
+    bool saved_loop = g_window_manager.focus_loop;
+
+    pair.view->layout = VIEW_SCROLL;
+    g_window_manager.focus_loop = false;
+    struct window *disabled_next = window_manager_find_next_managed_window(&g_space_manager, &g_window_manager, &pair.large);
+
+    pair.view->layout = VIEW_BSP;
+    g_window_manager.focus_loop = true;
+    struct window *bsp_next = window_manager_find_next_managed_window(&g_space_manager, &g_window_manager, &pair.large);
+    struct window *bsp_prev = window_manager_find_prev_managed_window(&g_space_manager, &g_window_manager, &pair.small);
+    bool stopped = ANGRY_ALL((disabled_next == NULL), (bsp_next == NULL), (bsp_prev == NULL));
+
+    pair.view->layout = saved_layout;
+    g_window_manager.focus_loop = saved_loop;
+    angry_tiled_pair_end(&pair);
+
+    ANGRY_ASSERT(stopped, "focus must stop at the ends unless the layout loops and the setting is on");
+}
+
 ANGRY_TEST(findsFirstManagedWindowOnActiveSpace)
 {
     struct angry_tiled_pair pair;

@@ -985,6 +985,16 @@ static void tests_isolate_scripting_addition(void)
     ANGRY_ENTRY(leavesFullStackLayoutUntouchedWhenOneMoreWindowArrives)         \
     ANGRY_ENTRY(tilesWindowBesideFullStackInsteadOfStackingOntoIt)              \
     ANGRY_ENTRY(leavesWindowOutOfLayoutWhenTilingOnFullStackSpace)              \
+    ANGRY_ENTRY(tilesScrollColumnsWithConfiguredWidthAndGap)                    \
+    ANGRY_ENTRY(scrollsFocusedColumnIntoView)                                   \
+    ANGRY_ENTRY(clampsScrollOffsetPastFirstAndLastColumn)                       \
+    ANGRY_ENTRY(reversesScrollColumnOrderWhenScrollReversed)                    \
+    ANGRY_ENTRY(stacksAccordionRibbonsAroundFocusedColumn)                      \
+    ANGRY_ENTRY(splitsAlongLongestSideWhenConfigured)                           \
+    ANGRY_ENTRY(splitsAcrossShortestSideWhenConfigured)                         \
+    ANGRY_ENTRY(usesGoldenRatioForGoldenAlgorithm)                              \
+    ANGRY_ENTRY(alternatesSplitAxisAcrossDepthForAlternateAlgorithm)            \
+    ANGRY_ENTRY(alternatesSplitAxisByDepthForSpiralAlgorithm)                   \
     ANGRY_ENTRY(resolvesDisplayOfTestWindow)                                    \
     ANGRY_ENTRY(resolvesSpaceOfTestWindow)                                      \
     ANGRY_ENTRY(reportsNormalLevelOfTestWindow)                                 \
@@ -1079,6 +1089,7 @@ static void tests_isolate_scripting_addition(void)
     ANGRY_ENTRY(parsesRuleSpecifyingAppFilterAndManageEffect)                   \
     ANGRY_ENTRY(dispatchesConfigDomainModifyingRuntimeSettings)                 \
     ANGRY_ENTRY(configuresSpaceGestureNaturalScrollingMode)                     \
+    ANGRY_ENTRY(clampsScrollColumnWidthConfigToSupportedRange)                  \
     ANGRY_ENTRY(rejectsFocusOfMissingDisplay)                                   \
     ANGRY_ENTRY(rejectsLayoutChangeOfMissingSpace)                              \
     ANGRY_ENTRY(rejectsToggleOfMissingWindow)                                   \
@@ -1194,6 +1205,8 @@ static void tests_isolate_scripting_addition(void)
     ANGRY_ENTRY(findsClosestManagedWindowInDirection)                          \
     ANGRY_ENTRY(findsPrevManagedWindowOnActiveSpace)                            \
     ANGRY_ENTRY(findsNextManagedWindowOnActiveSpace)                            \
+    ANGRY_ENTRY(wrapsFocusAcrossEndsOfLoopingLayout)                            \
+    ANGRY_ENTRY(keepsFocusAtEndsOutsideLoopingLayoutOrWhenDisabled)             \
     ANGRY_ENTRY(findsFirstManagedWindowOnActiveSpace)                           \
     ANGRY_ENTRY(findsLastManagedWindowOnActiveSpace)                            \
     ANGRY_ENTRY(findsRecentManagedWindowUsingLastWindowId)                      \

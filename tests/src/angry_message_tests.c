@@ -220,6 +220,37 @@ ANGRY_TEST(configuresSpaceGestureNaturalScrollingMode) {
     ANGRY_ASSERT(g_space_manager.gesture_natural_scrolling == SPACE_GESTURE_NATURAL_SCROLL_OFF, "handle_domain_config failed setting natural scrolling");
 }
 
+//
+// NOTE: the column width is a ratio of the display width. A value outside the
+// supported range must be clamped instead of making columns absurdly narrow or
+// wider than the display.
+//
+ANGRY_TEST(clampsScrollColumnWidthConfigToSupportedRange)
+{
+    float saved = g_window_manager.scroll_column_width;
+
+    char wide_buf[64] = {0};
+    FILE *wide = fmemopen(wide_buf, sizeof(wide_buf), "w");
+    char wide_msg[] = "scroll_column_width\0" "0.95\0\0";
+    struct token dom = { .text = "config", .length = 6 };
+    handle_domain_config(wide, dom, wide_msg);
+    fclose(wide);
+    float wide_ratio = g_window_manager.scroll_column_width;
+
+    char narrow_buf[64] = {0};
+    FILE *narrow = fmemopen(narrow_buf, sizeof(narrow_buf), "w");
+    char narrow_msg[] = "scroll_column_width\0" "0.05\0\0";
+    handle_domain_config(narrow, dom, narrow_msg);
+    fclose(narrow);
+    float narrow_ratio = g_window_manager.scroll_column_width;
+
+    g_window_manager.scroll_column_width = saved;
+
+    ANGRY_ASSERT_ALL("scroll_column_width must stay within the supported tenth-to-nine-tenths range",
+                     wide_ratio == 0.9f,
+                     narrow_ratio == 0.1f);
+}
+
 ANGRY_TEST(rejectsFocusOfMissingDisplay) {
     char buf[512] = {0};
     FILE *f = fmemopen(buf, sizeof(buf), "w");
